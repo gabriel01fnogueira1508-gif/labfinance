@@ -1,0 +1,2772 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LabFinance – Gestor de Projetos Financeiros</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #4982bc; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    .animate-fade { animation: fadeIn .18s ease; }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:translateY(0); } }
+    .table-scroll { overflow-x: auto; }
+    input[type=number]::-webkit-inner-spin-button { opacity:.6; }
+    @media print { .no-print { display: none !important; } }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+<div id="root"></div>
+
+<script type="text/babel">
+const {
+  useState, useEffect, useCallback, useMemo, useRef
+} = React;
+
+// ─── CONSTANTS ───────────────────────────────────────────────────────────────
+
+const PROJECT_TYPES = [
+  'Pesquisa','Extensão','Graduação','Pós-graduação',
+  'Iniciação Científica','Mestrado','Doutorado','Outro'
+];
+
+const DEFAULT_ITEM_TYPES = [
+  'Material de Consumo','Equipamento','Software','Serviço',
+  'Bolsa','Diária','Passagem','Publicação'
+];
+
+const DEFAULT_RUBRICAS = ['Capital','Custeio','Bolsas','Diárias','Passagens','Outros'];
+
+const TABS = ['overview','types','rubricas','items','payments','suppliers','reports','export'];
+const TAB_LABELS = {
+  overview:'Visão Geral',
+  types:'Tipos',
+  rubricas:'Rubricas',
+  items:'Itens / Compras',
+  payments:'Pagamentos',
+  suppliers:'Fornecedores',
+  reports:'Relatórios',
+  export:'Exportação'
+};
+const TAB_ICONS = {
+  overview:'🏠',
+  types:'🏷️',
+  rubricas:'💼',
+  items:'📋',
+  payments:'💳',
+  suppliers:'🏪',
+  reports:'📊',
+  export:'📤'
+};
+
+const TYPE_COLORS = [
+  { id:'blue',    bg:'bg-blue-100',    text:'text-blue-800',    dot:'bg-blue-500',    hex:'#3b82f6', label:'Azul'     },
+  { id:'emerald', bg:'bg-emerald-100', text:'text-emerald-800', dot:'bg-emerald-500', hex:'#10b981', label:'Verde'    },
+  { id:'amber',   bg:'bg-amber-100',   text:'text-amber-800',   dot:'bg-amber-500',   hex:'#f59e0b', label:'Amarelo'  },
+  { id:'purple',  bg:'bg-purple-100',  text:'text-purple-800',  dot:'bg-purple-500',  hex:'#8b5cf6', label:'Roxo'     },
+  { id:'red',     bg:'bg-red-100',     text:'text-red-800',     dot:'bg-red-500',     hex:'#ef4444', label:'Vermelho' },
+  { id:'pink',    bg:'bg-pink-100',    text:'text-pink-800',    dot:'bg-pink-500',    hex:'#ec4899', label:'Rosa'     },
+  { id:'cyan',    bg:'bg-cyan-100',    text:'text-cyan-800',    dot:'bg-cyan-500',    hex:'#06b6d4', label:'Ciano'    },
+  { id:'orange',  bg:'bg-orange-100',  text:'text-orange-800',  dot:'bg-orange-500',  hex:'#f97316', label:'Laranja'  },
+  { id:'teal',    bg:'bg-teal-100',    text:'text-teal-800',    dot:'bg-teal-500',    hex:'#14b8a6', label:'Teal'     },
+  { id:'indigo',  bg:'bg-indigo-100',  text:'text-indigo-800',  dot:'bg-indigo-500',  hex:'#6366f1', label:'Índigo'   },
+];
+
+const colorById = id => TYPE_COLORS.find(c => c.id === id) || TYPE_COLORS[0];
+const autoColor = idx => TYPE_COLORS[idx % TYPE_COLORS.length].id;
+
+const migrateTypes = arr => {
+  if (!Array.isArray(arr)) return [];
+  return arr.map((t, i) =>
+    typeof t === 'string'
+      ? { id: 'type-' + i + '-' + t.slice(0,4), nome: t, cor: autoColor(i), orcamento: 0 }
+      : { ...t, cor: t.cor || autoColor(i), orcamento: Number(t.orcamento) || 0 }
+  );
+};
+
+// ─── UTILITIES ───────────────────────────────────────────────────────────────
+
+const fmtCurrency = v =>
+  new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(Number(v)||0);
+
+const fmtDate = s => {
+  if (!s) return '–';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const [y,m,d] = s.split('-');
+    return `${d}/${m}/${y}`;
+  }
+  return s;
+};
+
+const todayISO = () => new Date().toISOString().split('T')[0];
+const isLate   = item => !item.pago && item.previsao_entrega && /^\d{4}-\d{2}-\d{2}$/.test(item.previsao_entrega) && new Date(item.previsao_entrega) < new Date(new Date().toDateString());
+const itemStatus = item => item.pago ? 'pago' : isLate(item) ? 'atrasado' : 'pendente';
+const genId    = () => Date.now().toString(36) + Math.random().toString(36).slice(2);
+const deepClone = o => JSON.parse(JSON.stringify(o));
+
+const getTypeColor = (nome, projectTypes) => {
+  const t = (projectTypes || []).find(t => t.nome === nome);
+  return t ? colorById(t.cor) : { bg:'bg-slate-100', text:'text-slate-700', dot:'bg-slate-400', hex:'#94a3b8', label:'Cinza' };
+};
+
+// converte datas do Excel, dd/mm/yyyy e yyyy-mm-dd para yyyy-mm-dd
+function normalizeDateInput(value) {
+  if (!value && value !== 0) return '';
+  if (typeof value === 'number') {
+    const d = XLSX.SSF.parse_date_code(value);
+    if (!d) return '';
+    const mm = String(d.m).padStart(2, '0');
+    const dd = String(d.d).padStart(2, '0');
+    return `${d.y}-${mm}-${dd}`;
+  }
+  const s = String(value).trim();
+  if (!s) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) {
+    const [dd, mm, yyyy] = s.split('/');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  return s;
+}
+
+function currencyToNumber(value) {
+  if (typeof value === 'number') return value;
+  const s = String(value ?? '').trim();
+  if (!s) return 0;
+  const cleaned = s
+    .replace(/\s/g, '')
+    .replace(/R\$/gi, '')
+    .replace(/\./g, '')
+    .replace(',', '.');
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// ─── SAMPLE DATA ─────────────────────────────────────────────────────────────
+
+const SAMPLE_PROJECTS = [
+  {
+    id:'proj-1',
+    nome:'Pesquisa em IA Aplicada à Saúde',
+    coordenador:'Prof. Dr. Ana Beatriz Silva',
+    instituicao:'UFMG – Lab. de Inteligência Artificial',
+    tipo:'Pesquisa',
+    data_criacao:'2024-03-15',
+    observacoes:'Financiado pelo CNPq. Foco em diagnóstico por imagem.',
+    criado_em:'2024-03-15T10:00:00Z'
+  },
+  {
+    id:'proj-2',
+    nome:'Desenvolvimento de Biosensores Ambientais',
+    coordenador:'Prof. Dr. Carlos Eduardo Santos',
+    instituicao:'USP – Lab. Química Analítica',
+    tipo:'Extensão',
+    data_criacao:'2024-01-10',
+    observacoes:'Parceria com empresa privada. Detecção de metais pesados.',
+    criado_em:'2024-01-10T09:00:00Z'
+  },
+];
+
+const SAMPLE_TYPES = {
+  'proj-1': [
+    { id:'t1a', nome:'Equipamento', cor:'blue', orcamento:15000 },
+    { id:'t1b', nome:'Software', cor:'purple', orcamento:8000 },
+    { id:'t1c', nome:'Material de Consumo', cor:'amber', orcamento:6000 },
+    { id:'t1d', nome:'Serviço', cor:'cyan', orcamento:10000 },
+    { id:'t1e', nome:'Bolsa', cor:'emerald', orcamento:12000 },
+  ],
+  'proj-2': [
+    { id:'t2a', nome:'Equipamento', cor:'blue', orcamento:20000 },
+    { id:'t2b', nome:'Reagentes', cor:'emerald', orcamento:12000 },
+    { id:'t2c', nome:'Vidrarias', cor:'cyan', orcamento:7000 },
+    { id:'t2d', nome:'Serviço de Análise', cor:'purple', orcamento:9000 },
+    { id:'t2e', nome:'Passagem', cor:'orange', orcamento:5000 },
+  ],
+};
+
+const SAMPLE_RUBRICAS = {
+  'proj-1': [
+    { id:'r1', nome:'Capital' },
+    { id:'r2', nome:'Custeio' },
+    { id:'r3', nome:'Bolsas' }
+  ],
+  'proj-2': [
+    { id:'r4', nome:'Capital' },
+    { id:'r5', nome:'Custeio' },
+    { id:'r6', nome:'Passagens' }
+  ],
+};
+
+const mk = (id,pid,tipo,desc,qty,vua,rubrica,vup,nped,dsol,forn,prev,nf,pago,obs) => {
+  const vta = qty*vua, vtp = qty*vup;
+  return {
+    id, projeto_id:pid, tipo_item:tipo, descricao:desc, quantidade:qty,
+    valor_unitario_aprovado:vua, valor_total_aprovado:vta, rubrica,
+    valor_unitario_pago:vup, valor_total_pago:vtp, saldo:vta-vtp,
+    numero_pedido_of:nped, data_solicitacao:dsol, fornecedor:forn,
+    previsao_entrega:prev, nf, pago, observacoes:obs
+  };
+};
+
+const SAMPLE_ITEMS = {
+  'proj-1': [
+    mk('i1a','proj-1','Equipamento','Computador Dell Inspiron 15',2,4500,'Capital',4350,'PED-001','2024-03-20','TechShop Informática','2024-04-15','NF-1234',true,'Entregue e instalado.'),
+    mk('i1b','proj-1','Software','Licença MATLAB – 12 meses',3,1200,'Custeio',1200,'PED-002','2024-03-25','MathWorks Brasil','2024-04-01','NF-5678',true,''),
+    mk('i1c','proj-1','Material de Consumo','HD Externo 2TB WD',5,350,'Custeio',0,'PED-003','2024-04-10','Magazine Luiza','2024-04-30','',false,'Aguardando entrega.'),
+    mk('i1d','proj-1','Serviço','Consultoria em Segurança de Dados',1,5000,'Custeio',0,'PED-004','2024-04-05','DataSec Consultoria','2024-03-01','',false,'Em negociação.'),
+    mk('i1e','proj-1','Bolsa','Bolsa IC – Gabriel Lima',12,800,'Bolsas',800,'BOL-001','2024-01-15','FAPEMIG','2024-12-31','',false,'6 parcelas pagas de 12.'),
+  ],
+  'proj-2': [
+    mk('i2a','proj-2','Equipamento','Potenciostato PalmSens4',1,18000,'Capital',18000,'PED-010','2024-01-15','PalmSens Brasil','2024-03-01','NF-10001',true,'Importado. Sem avarias.'),
+    mk('i2b','proj-2','Reagentes','Reagentes Químicos (kit)',10,850,'Custeio',820,'PED-011','2024-02-01','Sigma-Aldrich','2024-05-01','NF-10002',false,'5 kits entregues.'),
+    mk('i2c','proj-2','Serviço de Análise','Análise em Microscopia Eletrônica',3,2500,'Custeio',2500,'PED-012','2024-03-05','Lab. Central – USP','2024-04-20','NF-10003',true,'Análises concluídas.'),
+    mk('i2d','proj-2','Passagem','Passagem SP → Brasília (congresso)',2,1100,'Passagens',0,'PED-013','2024-04-20','LATAM Airlines','2024-06-10','',false,'SBPC 2024.'),
+  ],
+};
+
+// ─── STORAGE HOOK ────────────────────────────────────────────────────────────
+
+function useLS(key, initial) {
+  const [val, setVal] = useState(() => {
+    try {
+      const s = localStorage.getItem(key);
+      return s ? JSON.parse(s) : initial;
+    } catch {
+      return initial;
+    }
+  });
+
+  const set = useCallback(v => {
+    setVal(prev => {
+      const next = typeof v === 'function' ? v(prev) : v;
+      localStorage.setItem(key, JSON.stringify(next));
+      return next;
+    });
+  }, [key]);
+
+  
+return [val, set];
+}
+
+async function apiFetch(url, options = {}) {
+  const res = await fetch(url, {
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    },
+    ...options
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || 'Erro na comunicação com o servidor.');
+  }
+  return data;
+}
+
+function AuthScreen({ onLogin }) {
+  const [email, setEmail] = useState('');
+  const [senha, setSenha] = useState('');
+  const [show, setShow] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState('');
+
+  const submit = async e => {
+    e.preventDefault();
+    setErr('');
+    setLoading(true);
+    try {
+      const data = await apiFetch('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email, senha })
+      });
+      onLogin(data.user);
+    } catch (error) {
+      setErr(error.message || 'Não foi possível entrar.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+      <div className="grid lg:grid-cols-2 max-w-5xl w-full bg-white rounded-3xl overflow-hidden shadow-2xl border border-slate-200">
+        <div className="hidden lg:flex flex-col justify-between bg-gradient-to-br from-slate-900 via-slate-800 to-blue-900 text-white p-10">
+          <div>
+            <div className="inline-flex items-center gap-3 px-4 py-2 rounded-full bg-white/10 border border-white/10 text-sm font-medium">🔒 Acesso restrito</div>
+            <h1 className="text-4xl font-bold mt-6 leading-tight">LabFinance com autenticação real no backend</h1>
+            <p className="mt-4 text-slate-200 leading-7 text-sm">
+              Faça login com seu e-mail e senha para acessar o sistema. A sessão é validada no servidor.
+            </p>
+          </div>
+          <div className="text-sm text-slate-300">
+            <div className="mb-2">• Sessão por cookie</div>
+            <div className="mb-2">• Usuários no banco</div>
+            <div>• Login protegido no backend</div>
+          </div>
+        </div>
+
+        <div className="p-6 sm:p-10">
+          <div className="max-w-md mx-auto">
+            <div className="lg:hidden mb-6">
+              <div className="inline-flex items-center gap-3 px-4 py-2 rounded-full bg-slate-100 border border-slate-200 text-sm font-medium">🔒 Acesso restrito</div>
+            </div>
+            <div className="mb-8">
+              <h2 className="text-3xl font-bold text-slate-900">Entrar</h2>
+              <p className="text-slate-500 mt-2">Use o e-mail e a senha cadastrados no sistema.</p>
+            </div>
+
+            <form onSubmit={submit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">E-mail</label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
+                  className="w-full rounded-xl border border-slate-300 px-4 py-3 outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="voce@instituicao.com"
+                  autoComplete="email"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Senha</label>
+                <div className="relative">
+                  <input
+                    type={show ? 'text' : 'password'}
+                    value={senha}
+                    onChange={e => setSenha(e.target.value)}
+                    className="w-full rounded-xl border border-slate-300 px-4 py-3 pr-12 outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="Sua senha"
+                    autoComplete="current-password"
+                    required
+                  />
+                  <button type="button" onClick={() => setShow(s => !s)} className="absolute inset-y-0 right-3 text-sm text-slate-500 hover:text-slate-800">
+                    {show ? 'Ocultar' : 'Mostrar'}
+                  </button>
+                </div>
+              </div>
+
+              {err && <div className="rounded-xl bg-red-50 border border-red-200 text-red-700 px-4 py-3 text-sm">{err}</div>}
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full rounded-xl bg-slate-900 hover:bg-slate-800 text-white py-3 font-semibold disabled:opacity-60"
+              >
+                {loading ? 'Entrando...' : 'Entrar no sistema'}
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AuthApp() {
+  const [checking, setChecking] = useState(true);
+  const [session, setSession] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await apiFetch('/api/auth/me');
+        setSession(data.user);
+      } catch {
+        setSession(null);
+      } finally {
+        setChecking(false);
+      }
+    })();
+  }, []);
+
+  const logout = async () => {
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch {}
+    setSession(null);
+  };
+
+  if (checking) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-100">
+        <div className="bg-white border border-slate-200 rounded-2xl shadow-sm px-6 py-5 text-slate-700">Verificando sessão...</div>
+      </div>
+    );
+  }
+
+  if (!session) {
+    return <AuthScreen onLogin={setSession} />;
+  }
+
+  return <App session={session} onLogout={logout} />;
+}
+
+// ─── TOAST ───────────────────────────────────────────────────────────────────
+
+function ToastContainer({ toasts }) {
+  return (
+    <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2 no-print">
+      {toasts.map(t => (
+        <div
+          key={t.id}
+          className={`animate-fade flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium text-white max-w-xs
+            ${t.type==='success'?'bg-emerald-600':t.type==='error'?'bg-red-600':'bg-blue-600'}`}
+        >
+          <span>{t.type==='success'?'✓':t.type==='error'?'✕':'ℹ'}</span>
+          <span>{t.msg}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function useToast() {
+  const [toasts, setToasts] = useState([]);
+  const push = useCallback((msg, type='success') => {
+    const id = genId();
+    setToasts(p => [...p, {id,msg,type}]);
+    setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), 3200);
+  }, []);
+  return [toasts, push];
+}
+
+// ─── CONFIRM ─────────────────────────────────────────────────────────────────
+
+function Confirm({ msg, onYes, onNo }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 no-print" onClick={onNo}>
+      <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4 animate-fade" onClick={e=>e.stopPropagation()}>
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center text-red-600 text-lg">⚠</div>
+          <h3 className="font-semibold text-slate-800">Confirmar ação</h3>
+        </div>
+        <p className="text-slate-600 text-sm mb-5">{msg}</p>
+        <div className="flex gap-2 justify-end">
+          <button onClick={onNo} className="px-4 py-2 text-sm rounded-lg border border-slate-200 hover:bg-slate-50">Cancelar</button>
+          <button onClick={onYes} className="px-4 py-2 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700">Excluir</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── MODAL ───────────────────────────────────────────────────────────────────
+
+function Modal({ title, onClose, children, wide }) {
+  useEffect(() => {
+    const h = e => { if (e.key==='Escape') onClose(); };
+    document.addEventListener('keydown', h);
+    return () => document.removeEventListener('keydown', h);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 no-print p-4" onClick={onClose}>
+      <div
+        className={`bg-white rounded-2xl shadow-2xl w-full animate-fade flex flex-col max-h-[90vh] ${wide?'max-w-4xl':'max-w-xl'}`}
+        onClick={e=>e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+          <h2 className="font-semibold text-slate-800 text-base">{title}</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700 text-xl leading-none">×</button>
+        </div>
+        <div className="overflow-y-auto flex-1 p-6">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// ─── TYPE BADGE ──────────────────────────────────────────────────────────────
+
+function TypeBadge({ nome, projectTypes, size='sm' }) {
+  const c = getTypeColor(nome, projectTypes);
+  const sz = size==='sm' ? 'px-2.5 py-0.5 text-xs' : 'px-3 py-1 text-sm';
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full font-semibold ${sz} ${c.bg} ${c.text}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${c.dot} flex-shrink-0`} />
+      {nome}
+    </span>
+  );
+}
+
+// ─── COLOR PICKER ────────────────────────────────────────────────────────────
+
+function ColorPicker({ value, onChange }) {
+  return (
+    <div className="flex gap-1.5 flex-wrap">
+      {TYPE_COLORS.map(c => (
+        <button
+          key={c.id}
+          type="button"
+          onClick={() => onChange(c.id)}
+          title={c.label}
+          className={`w-6 h-6 rounded-full ${c.dot} transition-all hover:scale-110 focus:outline-none
+            ${value===c.id ? 'ring-2 ring-offset-2 ring-slate-500 scale-110' : 'opacity-70 hover:opacity-100'}`}
+        />
+      ))}
+    </div>
+  );
+}
+
+// ─── STATUS BADGE ────────────────────────────────────────────────────────────
+
+function StatusBadge({ status }) {
+  const map    = { pago:'bg-emerald-100 text-emerald-700', pendente:'bg-amber-100 text-amber-700', atrasado:'bg-red-100 text-red-700' };
+  const labels = { pago:'Pago', pendente:'Pendente', atrasado:'Atrasado' };
+  return (
+    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${map[status]||map.pendente}`}>
+      {labels[status]||status}
+    </span>
+  );
+}
+
+// ─── STAT CARD ───────────────────────────────────────────────────────────────
+
+function StatCard({ label, value, sub, color='blue', icon }) {
+  const colors = {
+    blue:  'bg-blue-50 text-blue-700 border-blue-100',
+    green: 'bg-emerald-50 text-emerald-700 border-emerald-100',
+    amber: 'bg-amber-50 text-amber-700 border-amber-100',
+    red:   'bg-red-50 text-red-700 border-red-100',
+    purple:'bg-purple-50 text-purple-700 border-purple-100',
+  };
+  return (
+    <div className={`rounded-xl border p-4 ${colors[color]}`}>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-xs font-medium opacity-80">{label}</span>
+        {icon && <span className="text-lg opacity-60">{icon}</span>}
+      </div>
+      <div className="text-xl font-bold">{value}</div>
+      {sub && <div className="text-xs mt-0.5 opacity-70">{sub}</div>}
+    </div>
+  );
+}
+
+// ─── CHART BOX ───────────────────────────────────────────────────────────────
+
+function ChartBox({ type, data, options={}, height=220 }) {
+  const ref  = useRef(null);
+  const inst = useRef(null);
+
+  useEffect(() => {
+    if (!ref.current) return;
+    if (inst.current) {
+      inst.current.destroy();
+      inst.current = null;
+    }
+    inst.current = new Chart(ref.current, {
+      type,
+      data,
+      options: {
+        responsive:true,
+        maintainAspectRatio:false,
+        plugins:{
+          legend:{position:'bottom',labels:{boxWidth:12,font:{size:11}}}
+        },
+        ...options
+      }
+    });
+    return () => {
+      if (inst.current) {
+        inst.current.destroy();
+        inst.current = null;
+      }
+    };
+  }, [JSON.stringify(data), type]);
+
+  return <div style={{height}}><canvas ref={ref} /></div>;
+}
+
+// ─── FIELD HELPER ────────────────────────────────────────────────────────────
+
+function Field({ label, required, children }) {
+  return (
+    <div>
+      <label className="block text-xs font-semibold text-slate-500 mb-1 uppercase tracking-wide">
+        {label}{required && <span className="text-red-500 ml-0.5">*</span>}
+      </label>
+      {children}
+    </div>
+  );
+}
+
+const inputCls  = "w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition";
+const selectCls = inputCls;
+
+// ─── PROJECT FORM ────────────────────────────────────────────────────────────
+
+function ProjectForm({ project, onSave, onCancel }) {
+  const blank = {
+    nome:'',
+    coordenador:'',
+    instituicao:'',
+    tipo:'Pesquisa',
+    tipo_outro:'',
+    data_criacao:todayISO(),
+    observacoes:''
+  };
+
+  const init = project
+    ? {
+        ...blank,
+        ...project,
+        tipo_outro: PROJECT_TYPES.includes(project.tipo) ? '' : project.tipo,
+        tipo: PROJECT_TYPES.includes(project.tipo) ? project.tipo : 'Outro'
+      }
+    : blank;
+
+  const [form, setForm] = useState(init);
+  const [err,  setErr]  = useState({});
+
+  const set = k => e => setForm(p => ({ ...p, [k]: e.target.value }));
+
+  const validate = () => {
+    const e = {};
+    if (!form.nome.trim()) e.nome = 'Nome é obrigatório';
+    if (!form.coordenador.trim()) e.coordenador = 'Coordenador é obrigatório';
+    if (form.tipo==='Outro' && !form.tipo_outro.trim()) e.tipo_outro = 'Informe o tipo';
+    setErr(e);
+    return !Object.keys(e).length;
+  };
+
+  const submit = () => {
+    if (!validate()) return;
+    onSave({
+      ...form,
+      tipo: form.tipo==='Outro' ? form.tipo_outro.trim() : form.tipo
+    });
+  };
+
+  return (
+    <div className="space-y-4">
+      <Field label="Nome do Projeto" required>
+        <input className={inputCls} value={form.nome} onChange={set('nome')} placeholder="Ex.: Pesquisa em Biossensores" />
+        {err.nome && <p className="text-red-500 text-xs mt-0.5">{err.nome}</p>}
+      </Field>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <Field label="Coordenador Responsável" required>
+          <input className={inputCls} value={form.coordenador} onChange={set('coordenador')} placeholder="Prof. Dr. ..." />
+          {err.coordenador && <p className="text-red-500 text-xs mt-0.5">{err.coordenador}</p>}
+        </Field>
+        <Field label="Instituição / Laboratório">
+          <input className={inputCls} value={form.instituicao} onChange={set('instituicao')} placeholder="UFMG – Lab. XYZ" />
+        </Field>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <Field label="Tipo de Projeto">
+            <select className={selectCls} value={form.tipo} onChange={set('tipo')}>
+              {PROJECT_TYPES.map(t => <option key={t}>{t}</option>)}
+            </select>
+          </Field>
+          {form.tipo==='Outro' && (
+            <div className="mt-2 animate-fade">
+              <input className={inputCls} value={form.tipo_outro} onChange={set('tipo_outro')} placeholder="Digite o tipo..." autoFocus />
+              {err.tipo_outro && <p className="text-red-500 text-xs mt-0.5">{err.tipo_outro}</p>}
+            </div>
+          )}
+        </div>
+
+        <Field label="Data de Criação">
+          <input type="date" className={inputCls} value={form.data_criacao} onChange={set('data_criacao')} />
+        </Field>
+      </div>
+
+      <Field label="Observações Gerais">
+        <textarea className={inputCls} rows={3} value={form.observacoes} onChange={set('observacoes')} placeholder="Informações adicionais..." />
+      </Field>
+
+      <div className="flex gap-2 pt-2 justify-end">
+        <button onClick={onCancel} className="px-4 py-2 text-sm rounded-lg border border-slate-200 hover:bg-slate-50">Cancelar</button>
+        <button onClick={submit} className="px-5 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-medium">
+          {project ? 'Salvar alterações' : 'Criar projeto'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── ITEM FORM ───────────────────────────────────────────────────────────────
+
+function ItemForm({ item, projectTypes, projectRubricas, onSave, onCancel }) {
+  const tipoNomes = projectTypes && projectTypes.length > 0
+    ? projectTypes.map(t => t.nome)
+    : DEFAULT_ITEM_TYPES;
+
+  const rubricaNomes = projectRubricas && projectRubricas.length > 0
+    ? projectRubricas.map(r => r.nome)
+    : DEFAULT_RUBRICAS;
+
+  const isCustom = item && !tipoNomes.includes(item.tipo_item);
+
+  const blank = {
+    tipo_item: tipoNomes[0] || '',
+    tipo_item_outro:'',
+    descricao:'',
+    quantidade:1,
+    valor_unitario_aprovado:'',
+    rubrica: rubricaNomes[0] || 'Custeio',
+    valor_unitario_pago:'',
+    numero_pedido_of:'',
+    data_solicitacao:todayISO(),
+    fornecedor:'',
+    previsao_entrega:'',
+    nf:'',
+    pago:false,
+    observacoes:''
+  };
+
+  const init = item
+    ? {
+        ...blank,
+        ...item,
+        tipo_item: isCustom ? '__outro__' : item.tipo_item,
+        tipo_item_outro: isCustom ? item.tipo_item : ''
+      }
+    : blank;
+
+  const [f, setF] = useState(init);
+  const [err, setErr] = useState({});
+  const [salvarTipo, setSalvarTipo] = useState(true);
+
+  const set = k => e => {
+    const v = e.target.type==='checkbox' ? e.target.checked : e.target.value;
+    setF(p => {
+      const n = { ...p, [k]: v };
+      n.valor_total_aprovado = (Number(n.quantidade)||0) * (Number(n.valor_unitario_aprovado)||0);
+      n.valor_total_pago     = (Number(n.quantidade)||0) * (Number(n.valor_unitario_pago)||0);
+      n.saldo = n.valor_total_aprovado - n.valor_total_pago;
+      return n;
+    });
+  };
+
+  const validate = () => {
+    const e = {};
+    if (!f.descricao.trim()) e.descricao = 'Descrição obrigatória';
+    if (!f.fornecedor.trim()) e.fornecedor = 'Fornecedor obrigatório';
+    if (Number(f.quantidade)<=0) e.quantidade = 'Qtd > 0';
+    if (f.tipo_item==='__outro__' && !f.tipo_item_outro.trim()) e.tipo_item_outro = 'Informe o tipo';
+    setErr(e);
+    return !Object.keys(e).length;
+  };
+
+  const submit = () => {
+    if (!validate()) return;
+    const tipoFinal = f.tipo_item==='__outro__' ? f.tipo_item_outro.trim() : f.tipo_item;
+    const novoTipo = f.tipo_item==='__outro__' && salvarTipo ? tipoFinal : null;
+    const { tipo_item_outro, ...rest } = f;
+    onSave({ ...rest, tipo_item: tipoFinal }, novoTipo);
+  };
+
+  const vta   = (Number(f.quantidade)||0) * (Number(f.valor_unitario_aprovado)||0);
+  const vtp   = (Number(f.quantidade)||0) * (Number(f.valor_unitario_pago)||0);
+  const saldo = vta - vtp;
+  const tipoAtual = f.tipo_item==='__outro__' ? (f.tipo_item_outro||'') : f.tipo_item;
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div>
+          <Field label="Tipo do Item">
+            <select className={selectCls} value={f.tipo_item} onChange={set('tipo_item')}>
+              {tipoNomes.map(n => <option key={n} value={n}>{n}</option>)}
+              <option value="__outro__">Outro (digitar)</option>
+            </select>
+          </Field>
+
+          {tipoAtual && f.tipo_item !== '__outro__' && (
+            <div className="mt-2">
+              <TypeBadge nome={tipoAtual} projectTypes={projectTypes} />
+            </div>
+          )}
+
+          {f.tipo_item==='__outro__' && (
+            <div className="mt-2 space-y-1.5 animate-fade">
+              <input className={inputCls} value={f.tipo_item_outro} onChange={set('tipo_item_outro')} placeholder="Digite o tipo..." autoFocus />
+              {err.tipo_item_outro && <p className="text-red-500 text-xs">{err.tipo_item_outro}</p>}
+
+              {f.tipo_item_outro.trim() && !tipoNomes.includes(f.tipo_item_outro.trim()) && (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      className="w-3.5 h-3.5 accent-blue-600"
+                      checked={salvarTipo}
+                      onChange={e=>setSalvarTipo(e.target.checked)}
+                    />
+                    <span className="text-xs text-slate-600">
+                      Salvar <strong>"{f.tipo_item_outro.trim()}"</strong> na lista de tipos
+                    </span>
+                  </label>
+                  <p className="text-[11px] text-blue-600 mt-1">
+                    Se marcado, esse novo tipo ficará salvo na aba <strong>Tipos</strong> deste projeto.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <Field label="Rubrica">
+          <select className={selectCls} value={f.rubrica} onChange={set('rubrica')}>
+            {rubricaNomes.map(r => <option key={r}>{r}</option>)}
+          </select>
+        </Field>
+
+        <Field label="Nº Pedido / OF">
+          <input className={inputCls} value={f.numero_pedido_of} onChange={set('numero_pedido_of')} placeholder="PED-2024-001" />
+        </Field>
+      </div>
+
+      <Field label="Descrição do Item" required>
+        <input className={inputCls} value={f.descricao} onChange={set('descricao')} placeholder="Descreva o item ou serviço" />
+        {err.descricao && <p className="text-red-500 text-xs">{err.descricao}</p>}
+      </Field>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <Field label="Quantidade" required>
+          <input type="number" min="1" className={inputCls} value={f.quantidade} onChange={set('quantidade')} />
+          {err.quantidade && <p className="text-red-500 text-xs">{err.quantidade}</p>}
+        </Field>
+
+        <Field label="V. Unit. Aprovado (R$)">
+          <input type="number" min="0" step="0.01" className={inputCls} value={f.valor_unitario_aprovado} onChange={set('valor_unitario_aprovado')} placeholder="0,00" />
+        </Field>
+
+        <Field label="V. Total Aprovado">
+          <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-sm font-medium text-slate-600">{fmtCurrency(vta)}</div>
+        </Field>
+
+        <Field label="V. Unit. Pago (R$)">
+          <input type="number" min="0" step="0.01" className={inputCls} value={f.valor_unitario_pago} onChange={set('valor_unitario_pago')} placeholder="0,00" />
+        </Field>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+        <Field label="V. Total Pago">
+          <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2 text-sm font-medium text-slate-600">{fmtCurrency(vtp)}</div>
+        </Field>
+
+        <Field label="Saldo">
+          <div className={`rounded-lg border px-3 py-2 text-sm font-semibold ${saldo<0?'border-red-200 bg-red-50 text-red-700':'border-emerald-100 bg-emerald-50 text-emerald-700'}`}>
+            {fmtCurrency(saldo)}
+          </div>
+        </Field>
+
+        <Field label="Pago?">
+          <label className="flex items-center gap-2 h-9 cursor-pointer">
+            <input type="checkbox" className="w-4 h-4 accent-blue-600" checked={f.pago} onChange={set('pago')} />
+            <span className="text-sm text-slate-600">{f.pago ? 'Sim – pago' : 'Não – pendente'}</span>
+          </label>
+        </Field>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="Fornecedor" required>
+          <input className={inputCls} value={f.fornecedor} onChange={set('fornecedor')} placeholder="Nome do fornecedor" />
+          {err.fornecedor && <p className="text-red-500 text-xs">{err.fornecedor}</p>}
+        </Field>
+
+        <Field label="Nota Fiscal (NF)">
+          <input className={inputCls} value={f.nf} onChange={set('nf')} placeholder="NF-000000" />
+        </Field>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="Data da Solicitação">
+          <input type="date" className={inputCls} value={f.data_solicitacao} onChange={set('data_solicitacao')} />
+        </Field>
+
+        <Field label="Previsão de Entrega">
+          <input type="date" className={inputCls} value={f.previsao_entrega} onChange={set('previsao_entrega')} />
+        </Field>
+      </div>
+
+      <Field label="Observações">
+        <textarea className={inputCls} rows={2} value={f.observacoes} onChange={set('observacoes')} placeholder="Observações sobre este item..." />
+      </Field>
+
+      <div className="flex gap-2 pt-1 justify-end">
+        <button onClick={onCancel} className="px-4 py-2 text-sm rounded-lg border border-slate-200 hover:bg-slate-50">Cancelar</button>
+        <button onClick={submit} className="px-5 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-medium">
+          {item ? 'Salvar alterações' : 'Adicionar item'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── TYPES TAB ───────────────────────────────────────────────────────────────
+
+function TypesTab({ projectTypes, items, onUpdateTypes, toast }) {
+  const nextAutoColor = autoColor(projectTypes.length);
+
+  const [newName, setNewName] = useState('');
+  const [newCor, setNewCor] = useState(nextAutoColor);
+  const [newOrcamento, setNewOrcamento] = useState('');
+
+  const [editId, setEditId] = useState(null);
+  const [editName, setEditName] = useState('');
+  const [editCor, setEditCor] = useState('blue');
+  const [editOrcamento, setEditOrcamento] = useState('');
+
+  const [delNome, setDelNome] = useState(null);
+  const inputRef = useRef(null);
+
+  const add = () => {
+    const v = newName.trim();
+    if (!v) return;
+    if (projectTypes.some(t => t.nome===v)) {
+      toast('Este tipo já existe.','error');
+      return;
+    }
+    const novoTipo = {
+      id: genId(),
+      nome: v,
+      cor: newCor,
+      orcamento: Number(newOrcamento) || 0
+    };
+    const updated = [...projectTypes, novoTipo];
+    onUpdateTypes(updated);
+    setNewName('');
+    setNewOrcamento('');
+    setNewCor(autoColor(updated.length));
+    toast('Tipo adicionado!');
+    inputRef.current?.focus();
+  };
+
+  const startEdit = t => {
+    setEditId(t.id);
+    setEditName(t.nome);
+    setEditCor(t.cor);
+    setEditOrcamento(String(Number(t.orcamento) || 0));
+  };
+
+  const saveEdit = () => {
+    const v = editName.trim();
+    if (!v) return;
+    if (projectTypes.some(t => t.nome===v && t.id!==editId)) {
+      toast('Já existe um tipo com este nome.','error');
+      return;
+    }
+    onUpdateTypes(
+      projectTypes.map(t =>
+        t.id===editId
+          ? { ...t, nome:v, cor:editCor, orcamento: Number(editOrcamento) || 0 }
+          : t
+      )
+    );
+    setEditId(null);
+    toast('Tipo atualizado!');
+  };
+
+  const remove = nome => {
+    onUpdateTypes(projectTypes.filter(t => t.nome!==nome));
+    setDelNome(null);
+    toast('Tipo removido.','error');
+  };
+
+  return (
+    <div className="max-w-4xl space-y-5">
+      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-sm text-blue-700">
+        <strong>🏷️ Tipos de Item deste projeto</strong>
+        <p className="mt-1 text-xs text-blue-600">
+          Cadastre tipos com cor e orçamento próprio. O sistema vai somar automaticamente os itens desse grupo
+          e mostrar orçamento, total previsto e saldo.
+        </p>
+      </div>
+
+      <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
+        <h3 className="text-sm font-semibold text-slate-700">Adicionar novo tipo</h3>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <input
+            ref={inputRef}
+            className={inputCls + " sm:col-span-2"}
+            value={newName}
+            onChange={e=>setNewName(e.target.value)}
+            onKeyDown={e=>e.key==='Enter'&&add()}
+            placeholder="Ex.: Vidrarias, Reagentes, Equipamentos..."
+          />
+          <input
+            type="number"
+            min="0"
+            step="0.01"
+            className={inputCls}
+            value={newOrcamento}
+            onChange={e=>setNewOrcamento(e.target.value)}
+            placeholder="Orçamento (R$)"
+          />
+        </div>
+
+        <div>
+          <p className="text-xs text-slate-500 mb-1.5">Cor do badge:</p>
+          <ColorPicker value={newCor} onChange={setNewCor} />
+        </div>
+
+        {newName.trim() && (
+          <div className="flex items-center gap-2 text-xs text-slate-500">
+            <span>Pré-visualização:</span>
+            <TypeBadge nome={newName.trim()} projectTypes={[{id:'prev', nome:newName.trim(), cor:newCor, orcamento:Number(newOrcamento)||0}]} />
+          </div>
+        )}
+
+        <div className="flex justify-end">
+          <button
+            onClick={add}
+            className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 font-medium whitespace-nowrap"
+          >
+            + Adicionar
+          </button>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl border border-slate-100 overflow-hidden">
+        <div className="px-5 py-3 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+          <span className="text-sm font-semibold text-slate-700">Tipos cadastrados</span>
+          <span className="text-xs text-slate-400 bg-white border border-slate-200 px-2 py-0.5 rounded-full">
+            {projectTypes.length} {projectTypes.length===1?'tipo':'tipos'}
+          </span>
+        </div>
+
+        {projectTypes.length === 0 ? (
+          <div className="text-center py-10 text-slate-400">
+            <div className="text-3xl mb-2">🏷️</div>
+            <div className="text-sm font-medium">Nenhum tipo cadastrado ainda</div>
+            <div className="text-xs mt-1">Use o formulário acima para adicionar</div>
+          </div>
+        ) : (
+          <ul className="divide-y divide-slate-50">
+            {projectTypes.map((tipo, idx) => (
+              <li key={tipo.id} className="px-5 py-3 hover:bg-slate-50 transition-colors group">
+                {editId===tipo.id ? (
+                  <div className="space-y-2 animate-fade">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <input
+                        className={inputCls + " sm:col-span-2 py-1.5"}
+                        value={editName}
+                        onChange={e=>setEditName(e.target.value)}
+                        onKeyDown={e=>{ if(e.key==='Enter') saveEdit(); if(e.key==='Escape') setEditId(null); }}
+                        autoFocus
+                      />
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        className={inputCls + " py-1.5"}
+                        value={editOrcamento}
+                        onChange={e=>setEditOrcamento(e.target.value)}
+                        placeholder="Orçamento (R$)"
+                      />
+                    </div>
+
+                    <div>
+                      <p className="text-xs text-slate-500 mb-1.5">Cor:</p>
+                      <ColorPicker value={editCor} onChange={setEditCor} />
+                    </div>
+
+                    {editName.trim() && (
+                      <div className="flex items-center gap-2 text-xs text-slate-500">
+                        <span>Pré-visualização:</span>
+                        <TypeBadge nome={editName.trim()} projectTypes={[{id:'prev', nome:editName.trim(), cor:editCor, orcamento:Number(editOrcamento)||0}]} />
+                      </div>
+                    )}
+
+                    <div className="flex gap-2">
+                      <button onClick={saveEdit} className="px-3 py-1.5 text-xs bg-emerald-600 text-white rounded-lg hover:bg-emerald-700">Salvar</button>
+                      <button onClick={()=>setEditId(null)} className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg hover:bg-slate-100 text-slate-600">✕</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-start gap-3">
+                    <span className="w-5 h-5 rounded-full bg-slate-100 text-slate-500 text-xs flex items-center justify-center font-semibold flex-shrink-0 mt-1">
+                      {idx+1}
+                    </span>
+
+                    <div className="flex-1">
+                      <TypeBadge nome={tipo.nome} projectTypes={projectTypes} size="sm" />
+
+                      {(() => {
+                        const itensDoTipo = items.filter(i => i.tipo_item === tipo.nome);
+                        const totalTipo = itensDoTipo.reduce((s, i) => s + i.valor_total_aprovado, 0);
+                        const saldoTipo = (Number(tipo.orcamento) || 0) - totalTipo;
+                        const percentual = (Number(tipo.orcamento) || 0) > 0
+                          ? Math.min(100, (totalTipo / Number(tipo.orcamento)) * 100)
+                          : 0;
+
+                        return (
+                          <div className="mt-2 space-y-1">
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                              <div className="bg-slate-50 rounded-lg px-2 py-1">
+                                <div className="text-slate-400">Orçamento</div>
+                                <div className="font-semibold text-slate-700">{fmtCurrency(tipo.orcamento || 0)}</div>
+                              </div>
+                              <div className="bg-blue-50 rounded-lg px-2 py-1">
+                                <div className="text-slate-400">Total dos itens</div>
+                                <div className="font-semibold text-blue-700">{fmtCurrency(totalTipo)}</div>
+                              </div>
+                              <div className={`rounded-lg px-2 py-1 ${saldoTipo < 0 ? 'bg-red-50' : 'bg-emerald-50'}`}>
+                                <div className="text-slate-400">Saldo</div>
+                                <div className={`font-semibold ${saldoTipo < 0 ? 'text-red-700' : 'text-emerald-700'}`}>
+                                  {fmtCurrency(saldoTipo)}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+                              <div
+                                className={`h-2 rounded-full ${
+                                  saldoTipo < 0 ? 'bg-red-500' : percentual >= 80 ? 'bg-amber-500' : 'bg-emerald-500'
+                                }`}
+                                style={{ width: `${Math.min(percentual, 100)}%` }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+
+                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button onClick={()=>startEdit(tipo)} className="p-1.5 rounded-lg hover:bg-blue-50 text-blue-500 text-xs" title="Editar">✏</button>
+                      <button onClick={()=>setDelNome(tipo.nome)} className="p-1.5 rounded-lg hover:bg-red-50 text-red-500 text-xs" title="Excluir">🗑</button>
+                    </div>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {projectTypes.length > 0 && (
+        <p className="text-xs text-slate-400 text-center">
+          Os badges coloridos aparecem em Itens, Pagamentos, Relatórios e Visão Geral.
+        </p>
+      )}
+
+      {delNome && (
+        <Confirm
+          msg={`Deseja excluir o tipo "${delNome}"? Itens que já usam este tipo não serão afetados.`}
+          onYes={()=>remove(delNome)}
+          onNo={()=>setDelNome(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── RUBRICAS TAB ────────────────────────────────────────────────────────────
+
+function RubricasTab({ rubricas, items, onUpdateRubricas, toast }) {
+  const [newName, setNewName] = useState('');
+  const [editId, setEditId] = useState(null);
+  const [editName, setEditName] = useState('');
+  const [delId, setDelId] = useState(null);
+
+  const add = () => {
+    const nome = newName.trim();
+    if (!nome) return;
+    if (rubricas.some(r => r.nome === nome)) {
+      toast('Essa rubrica já existe.', 'error');
+      return;
+    }
+    onUpdateRubricas([...rubricas, { id: genId(), nome }]);
+    setNewName('');
+    toast('Rubrica adicionada!');
+  };
+
+  const startEdit = r => {
+    setEditId(r.id);
+    setEditName(r.nome);
+  };
+
+  const saveEdit = () => {
+    const nome = editName.trim();
+    if (!nome) return;
+    if (rubricas.some(r => r.nome === nome && r.id !== editId)) {
+      toast('Já existe uma rubrica com esse nome.', 'error');
+      return;
+    }
+    onUpdateRubricas(rubricas.map(r => r.id === editId ? { ...r, nome } : r));
+    setEditId(null);
+    setEditName('');
+    toast('Rubrica atualizada!');
+  };
+
+  const remove = id => {
+    onUpdateRubricas(rubricas.filter(r => r.id !== id));
+    setDelId(null);
+    toast('Rubrica removida.', 'error');
+  };
+
+  return (
+    <div className="max-w-3xl space-y-5">
+      <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
+        <h3 className="text-sm font-semibold text-slate-700">Adicionar nova rubrica</h3>
+        <div className="flex gap-2">
+          <input
+            className={inputCls + " flex-1"}
+            value={newName}
+            onChange={e => setNewName(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && add()}
+            placeholder="Ex.: Capital, Custeio, Bolsa..."
+          />
+          <button
+            onClick={add}
+            className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 font-medium"
+          >
+            + Adicionar
+          </button>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl border border-slate-100 overflow-hidden">
+        <div className="px-5 py-3 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+          <span className="text-sm font-semibold text-slate-700">Rubricas do projeto</span>
+          <span className="text-xs text-slate-400 bg-white border border-slate-200 px-2 py-0.5 rounded-full">
+            {rubricas.length} {rubricas.length === 1 ? 'rubrica' : 'rubricas'}
+          </span>
+        </div>
+
+        {rubricas.length === 0 ? (
+          <div className="text-center py-10 text-slate-400">
+            <div className="text-3xl mb-2">💼</div>
+            <div className="text-sm font-medium">Nenhuma rubrica cadastrada</div>
+          </div>
+        ) : (
+          <ul className="divide-y divide-slate-50">
+            {rubricas.map((rubrica, idx) => {
+              const itensDaRubrica = items.filter(i => i.rubrica === rubrica.nome);
+              const total = itensDaRubrica.reduce((s, i) => s + i.valor_total_aprovado, 0);
+
+              return (
+                <li key={rubrica.id} className="px-5 py-3 hover:bg-slate-50 transition-colors">
+                  {editId === rubrica.id ? (
+                    <div className="flex gap-2">
+                      <input
+                        className={inputCls + " flex-1 py-1.5"}
+                        value={editName}
+                        onChange={e => setEditName(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') saveEdit();
+                          if (e.key === 'Escape') setEditId(null);
+                        }}
+                        autoFocus
+                      />
+                      <button onClick={saveEdit} className="px-3 py-1.5 text-xs bg-emerald-600 text-white rounded-lg hover:bg-emerald-700">Salvar</button>
+                      <button onClick={() => setEditId(null)} className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg hover:bg-slate-100 text-slate-600">✕</button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-3">
+                      <span className="w-5 h-5 rounded-full bg-slate-100 text-slate-500 text-xs flex items-center justify-center font-semibold flex-shrink-0">
+                        {idx + 1}
+                      </span>
+
+                      <div className="flex-1">
+                        <div className="font-medium text-slate-700">{rubrica.nome}</div>
+                        <div className="text-xs text-slate-400 mt-1">
+                          {itensDaRubrica.length} itens · Total aprovado: {fmtCurrency(total)}
+                        </div>
+                      </div>
+
+                      <div className="flex gap-1">
+                        <button onClick={() => startEdit(rubrica)} className="p-1.5 rounded-lg hover:bg-blue-50 text-blue-500 text-xs" title="Editar">✏</button>
+                        <button onClick={() => setDelId(rubrica.id)} className="p-1.5 rounded-lg hover:bg-red-50 text-red-500 text-xs" title="Excluir">🗑</button>
+                      </div>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+
+      {delId && (
+        <Confirm
+          msg="Deseja excluir esta rubrica? Os itens existentes não serão apagados, mas continuarão com o nome salvo neles."
+          onYes={() => remove(delId)}
+          onNo={() => setDelId(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── OVERVIEW TAB ────────────────────────────────────────────────────────────
+
+function OverviewTab({ project, items, projectTypes }) {
+  const totalAprov = items.reduce((s,i)=>s+i.valor_total_aprovado,0);
+  const totalPago  = items.reduce((s,i)=>s+i.valor_total_pago,0);
+  const saldo      = totalAprov - totalPago;
+  const pagos      = items.filter(i=>i.pago).length;
+  const atrasados  = items.filter(i=>itemStatus(i)==='atrasado').length;
+  const pctPago    = totalAprov>0 ? ((totalPago/totalAprov)*100).toFixed(1) : 0;
+
+  const byTipo = {};
+  items.forEach(i => { byTipo[i.tipo_item] = (byTipo[i.tipo_item]||0) + i.valor_total_aprovado; });
+  const byRubrica = {};
+  items.forEach(i => { byRubrica[i.rubrica] = (byRubrica[i.rubrica]||0) + i.valor_total_aprovado; });
+
+  const tipoLabels = Object.keys(byTipo);
+  const tipoColors = tipoLabels.map(n => getTypeColor(n, projectTypes).hex);
+
+  const tipoData = {
+    labels: tipoLabels,
+    datasets:[{ data:Object.values(byTipo), backgroundColor:tipoColors, borderWidth:2, borderColor:'#fff' }]
+  };
+
+  const rubricaData = {
+    labels: Object.keys(byRubrica),
+    datasets:[{ label:'Aprovado (R$)', data:Object.values(byRubrica), backgroundColor:'#3b82f6', borderRadius:6 }]
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <StatCard label="Total Aprovado" value={fmtCurrency(totalAprov)} color="blue" icon="📋" />
+        <StatCard label="Total Pago" value={fmtCurrency(totalPago)} sub={`${pctPago}% realizado`} color="green" icon="✅" />
+        <StatCard label="Saldo Disponível" value={fmtCurrency(saldo)} color={saldo<0?'red':'amber'} icon="💰" />
+        <StatCard label="Itens Cadastrados" value={items.length} sub={`${pagos} pagos · ${items.length-pagos} pendentes`} color="purple" icon="📦" />
+      </div>
+
+      {atrasados > 0 && (
+        <div className="flex items-center gap-3 bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-red-700 text-sm">
+          <span className="text-lg">⚠️</span>
+          <span><strong>{atrasados} {atrasados===1?'item':'itens'}</strong> com prazo vencido e ainda não {atrasados===1?'pago':'pagos'}!</span>
+        </div>
+      )}
+
+      <div className="bg-white rounded-xl border border-slate-100 p-5">
+        <h3 className="font-semibold text-slate-700 mb-3 text-sm uppercase tracking-wide">Informações do Projeto</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+          {[
+            ['Coordenador',project.coordenador],
+            ['Instituição',project.instituicao],
+            ['Tipo',project.tipo],
+            ['Data de Criação',fmtDate(project.data_criacao)]
+          ].map(([k,v])=>(
+            <div key={k}>
+              <span className="text-slate-400 text-xs uppercase">{k}</span>
+              <div className="font-medium text-slate-700">{v||'–'}</div>
+            </div>
+          ))}
+        </div>
+        {project.observacoes && (
+          <div className="mt-3 pt-3 border-t border-slate-100 text-sm text-slate-600">
+            <span className="text-xs text-slate-400 uppercase block mb-1">Observações</span>
+            {project.observacoes}
+          </div>
+        )}
+      </div>
+
+      {projectTypes.length > 0 && (
+        <div className="bg-white rounded-xl border border-slate-100 p-5">
+          <h3 className="font-semibold text-slate-700 mb-3 text-sm">Tipos deste projeto</h3>
+          <div className="flex flex-wrap gap-2">
+            {projectTypes.map(t => (
+              <TypeBadge key={t.id} nome={t.nome} projectTypes={projectTypes} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {items.length > 0 && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="bg-white rounded-xl border border-slate-100 p-5">
+            <h3 className="font-semibold text-slate-700 mb-4 text-sm">Distribuição por Tipo de Item</h3>
+            <ChartBox
+              type="doughnut"
+              data={tipoData}
+              height={220}
+              options={{plugins:{legend:{position:'right',labels:{boxWidth:12,font:{size:10}}}}}}
+            />
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-100 p-5">
+            <h3 className="font-semibold text-slate-700 mb-4 text-sm">Valor Aprovado por Rubrica</h3>
+            <ChartBox
+              type="bar"
+              data={rubricaData}
+              height={220}
+              options={{
+                plugins:{legend:{display:false}},
+                scales:{y:{ticks:{callback:v=>'R$'+Number(v).toLocaleString('pt-BR')}}}
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {projectTypes.length > 0 && (
+        <div className="bg-white rounded-xl border border-slate-100 p-5">
+          <h3 className="font-semibold text-slate-700 mb-4 text-sm">Orçamento por Tipo</h3>
+          <div className="space-y-3">
+            {projectTypes.map(tipo => {
+              const itensDoTipo = items.filter(i => i.tipo_item === tipo.nome);
+              const totalTipo = itensDoTipo.reduce((s, i) => s + i.valor_total_aprovado, 0);
+              const saldoTipo = (Number(tipo.orcamento) || 0) - totalTipo;
+              const percentual = (Number(tipo.orcamento) || 0) > 0
+                ? Math.min(100, (totalTipo / Number(tipo.orcamento)) * 100)
+                : 0;
+
+              return (
+                <div key={tipo.id} className="border border-slate-100 rounded-xl p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
+                    <TypeBadge nome={tipo.nome} projectTypes={projectTypes} />
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs sm:text-sm w-full sm:w-auto">
+                      <div className="bg-slate-50 rounded-lg px-3 py-2">
+                        <div className="text-slate-400">Orçamento</div>
+                        <div className="font-semibold text-slate-700">{fmtCurrency(tipo.orcamento || 0)}</div>
+                      </div>
+                      <div className="bg-blue-50 rounded-lg px-3 py-2">
+                        <div className="text-slate-400">Total dos itens</div>
+                        <div className="font-semibold text-blue-700">{fmtCurrency(totalTipo)}</div>
+                      </div>
+                      <div className={`rounded-lg px-3 py-2 ${saldoTipo < 0 ? 'bg-red-50' : 'bg-emerald-50'}`}>
+                        <div className="text-slate-400">Saldo</div>
+                        <div className={`font-semibold ${saldoTipo < 0 ? 'text-red-700' : 'text-emerald-700'}`}>
+                          {fmtCurrency(saldoTipo)}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+                    <div
+                      className={`h-2 rounded-full ${
+                        saldoTipo < 0 ? 'bg-red-500' : percentual >= 80 ? 'bg-amber-500' : 'bg-emerald-500'
+                      }`}
+                      style={{ width: `${Math.min(percentual, 100)}%` }}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── ITEMS TAB ───────────────────────────────────────────────────────────────
+
+function ItemsTab({ items, projectTypes, projectRubricas, onAdd, onEdit, onDelete, onAddType, toast }) {
+  const [search, setSearch] = useState('');
+  const [filters, setFilters] = useState({ tipo:'', rubrica:'', status:'', fornecedor:'' });
+  const [sort, setSort] = useState({ col:'data_solicitacao', dir:'desc' });
+  const [editItem, setEditItem] = useState(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [delId, setDelId] = useState(null);
+  const [showFilters, setShowFilters] = useState(false);
+
+  const tiposUsados = [...new Set(items.map(i=>i.tipo_item))];
+  const rubricas = [...new Set(items.map(i=>i.rubrica))];
+  const fornecedores = [...new Set(items.map(i=>i.fornecedor).filter(Boolean))];
+
+  const filtered = useMemo(() => {
+    let r = items;
+    if (search) r = r.filter(i=>JSON.stringify(i).toLowerCase().includes(search.toLowerCase()));
+    if (filters.tipo) r = r.filter(i=>i.tipo_item===filters.tipo);
+    if (filters.rubrica) r = r.filter(i=>i.rubrica===filters.rubrica);
+    if (filters.status) r = r.filter(i=>itemStatus(i)===filters.status);
+    if (filters.fornecedor) r = r.filter(i=>i.fornecedor===filters.fornecedor);
+
+    return [...r].sort((a,b)=>{
+      let va = a[sort.col], vb = b[sort.col];
+      if (typeof va === 'string') {
+        va = va.toLowerCase();
+        vb = (vb||'').toLowerCase();
+      }
+      return va<vb ? (sort.dir==='asc'?-1:1) : va>vb ? (sort.dir==='asc'?1:-1) : 0;
+    });
+  }, [items, search, filters, sort]);
+
+  const toggleSort = col => setSort(s=>({ col, dir:s.col===col&&s.dir==='asc'?'desc':'asc' }));
+  const SortIcon   = ({col}) => sort.col===col ? (sort.dir==='asc'?'↑':'↓') : <span className="opacity-30">↕</span>;
+
+  const totalAprov = filtered.reduce((s,i)=>s+i.valor_total_aprovado,0);
+  const totalPago  = filtered.reduce((s,i)=>s+i.valor_total_pago,0);
+
+  const handleSave = (data, novoTipo) => {
+    if (novoTipo && !projectTypes.some(t=>t.nome===novoTipo)) {
+      const cor = autoColor(projectTypes.length);
+      onAddType({ id:genId(), nome:novoTipo, cor, orcamento:0 });
+      toast(`Tipo "${novoTipo}" salvo na lista!`);
+    }
+
+    if (editItem) {
+      onEdit(data);
+      toast('Item atualizado!');
+    } else {
+      onAdd(data);
+      toast('Item adicionado!');
+    }
+
+    setEditItem(null);
+    setAddOpen(false);
+  };
+
+  const thCls = "px-3 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide cursor-pointer hover:text-slate-800 whitespace-nowrap select-none";
+  const tdCls = "px-3 py-2.5 text-sm text-slate-700 whitespace-nowrap";
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative flex-1 min-w-[180px]">
+          <span className="absolute left-3 top-2.5 text-slate-400 text-sm">🔍</span>
+          <input
+            className="w-full pl-8 pr-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            placeholder="Buscar itens..."
+            value={search}
+            onChange={e=>setSearch(e.target.value)}
+          />
+        </div>
+
+        <button
+          onClick={()=>setShowFilters(p=>!p)}
+          className={`flex items-center gap-1.5 px-3 py-2 text-sm rounded-lg border transition ${showFilters?'bg-blue-600 text-white border-blue-600':'border-slate-200 hover:bg-slate-50'}`}
+        >
+          ⚙ Filtros
+        </button>
+
+        <button
+          onClick={()=>setAddOpen(true)}
+          className="flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
+        >
+          + Novo Item
+        </button>
+      </div>
+
+      {showFilters && (
+        <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 grid grid-cols-2 sm:grid-cols-4 gap-3 animate-fade">
+          {[
+            ['Tipo','tipo',tiposUsados],
+            ['Rubrica','rubrica',rubricas],
+            ['Status','status',['pago','pendente','atrasado']],
+            ['Fornecedor','fornecedor',fornecedores]
+          ].map(([label,key,opts])=>(
+            <div key={key}>
+              <label className="block text-xs text-slate-500 mb-1">{label}</label>
+              <select
+                className="w-full text-sm border border-slate-200 rounded-lg px-2 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                value={filters[key]}
+                onChange={e=>setFilters(p=>({...p,[key]:e.target.value}))}
+              >
+                <option value="">Todos</option>
+                {opts.map(o=><option key={o}>{o}</option>)}
+              </select>
+            </div>
+          ))}
+          <button onClick={()=>setFilters({tipo:'',rubrica:'',status:'',fornecedor:''})} className="text-xs text-red-500 hover:underline self-end mb-1">Limpar</button>
+        </div>
+      )}
+
+      {filtered.length > 0 && (
+        <div className="flex flex-wrap gap-3 text-sm">
+          <span className="bg-blue-50 text-blue-700 px-3 py-1 rounded-full">{filtered.length} {filtered.length===1?'item':'itens'}</span>
+          <span className="bg-slate-100 text-slate-600 px-3 py-1 rounded-full">Aprovado: <strong>{fmtCurrency(totalAprov)}</strong></span>
+          <span className="bg-emerald-50 text-emerald-700 px-3 py-1 rounded-full">Pago: <strong>{fmtCurrency(totalPago)}</strong></span>
+          <span className={`px-3 py-1 rounded-full ${totalAprov-totalPago<0?'bg-red-50 text-red-700':'bg-amber-50 text-amber-700'}`}>
+            Saldo: <strong>{fmtCurrency(totalAprov-totalPago)}</strong>
+          </span>
+        </div>
+      )}
+
+      <div className="bg-white rounded-xl border border-slate-100 table-scroll">
+        {filtered.length===0 ? (
+          <div className="text-center py-16 text-slate-400">
+            <div className="text-4xl mb-2">📋</div>
+            <div className="font-medium">Nenhum item encontrado</div>
+            <div className="text-sm mt-1">Clique em "+ Novo Item" para adicionar</div>
+          </div>
+        ) : (
+          <table className="w-full min-w-[900px]">
+            <thead className="bg-slate-50 border-b border-slate-100">
+              <tr>
+                {[
+                  ['tipo_item','Tipo'],
+                  ['descricao','Descrição'],
+                  ['quantidade','Qtd'],
+                  ['valor_total_aprovado','Aprov.'],
+                  ['rubrica','Rubrica'],
+                  ['valor_total_pago','Pago'],
+                  ['saldo','Saldo'],
+                  ['data_solicitacao','Solicitação'],
+                  ['fornecedor','Fornecedor'],
+                  ['previsao_entrega','Prev. Entrega'],
+                  ['nf','NF'],
+                  ['status','Status']
+                ].map(([col,lbl])=>(
+                  <th key={col} className={thCls} onClick={()=>col!=='status'&&toggleSort(col)}>
+                    {lbl} {col!=='status'&&<SortIcon col={col}/>}
+                  </th>
+                ))}
+                <th className="px-3 py-2.5 text-xs text-slate-500 uppercase">Ações</th>
+              </tr>
+            </thead>
+
+            <tbody className="divide-y divide-slate-50">
+              {filtered.map(item => {
+                const st = itemStatus(item);
+                return (
+                  <tr key={item.id} className="hover:bg-slate-50/60 transition-colors">
+                    <td className={tdCls}>
+                      <TypeBadge nome={item.tipo_item} projectTypes={projectTypes} />
+                    </td>
+                    <td className={tdCls + " max-w-[180px]"}>
+                      <div className="truncate font-medium" title={item.descricao}>{item.descricao}</div>
+                      {item.numero_pedido_of && <div className="text-xs text-slate-400">{item.numero_pedido_of}</div>}
+                    </td>
+                    <td className={tdCls + " text-center"}>{item.quantidade}</td>
+                    <td className={tdCls}>{fmtCurrency(item.valor_total_aprovado)}</td>
+                    <td className={tdCls}><span className="text-xs bg-purple-50 text-purple-700 px-2 py-0.5 rounded-full">{item.rubrica}</span></td>
+                    <td className={tdCls}>{fmtCurrency(item.valor_total_pago)}</td>
+                    <td className={tdCls}><span className={item.saldo<0?'text-red-600 font-semibold':''}>{fmtCurrency(item.saldo)}</span></td>
+                    <td className={tdCls}>{fmtDate(item.data_solicitacao)}</td>
+                    <td className={tdCls + " max-w-[120px]"}><div className="truncate" title={item.fornecedor}>{item.fornecedor||'–'}</div></td>
+                    <td className={tdCls}><span className={isLate(item)&&!item.pago?'text-red-600 font-medium':''}>{fmtDate(item.previsao_entrega)}</span></td>
+                    <td className={tdCls}><span className="text-xs text-slate-500">{item.nf||'–'}</span></td>
+                    <td className={tdCls}><StatusBadge status={st} /></td>
+                    <td className="px-3 py-2.5">
+                      <div className="flex items-center gap-1">
+                        <button onClick={()=>setEditItem(item)} className="p-1.5 rounded-lg hover:bg-blue-50 text-blue-500 text-xs" title="Editar">✏</button>
+                        <button onClick={()=>setDelId(item.id)} className="p-1.5 rounded-lg hover:bg-red-50 text-red-500 text-xs" title="Excluir">🗑</button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {addOpen && (
+        <Modal title="Novo Item" wide onClose={()=>setAddOpen(false)}>
+          <ItemForm
+            projectTypes={projectTypes}
+            projectRubricas={projectRubricas}
+            onSave={handleSave}
+            onCancel={()=>setAddOpen(false)}
+          />
+        </Modal>
+      )}
+
+      {editItem && (
+        <Modal title="Editar Item" wide onClose={()=>setEditItem(null)}>
+          <ItemForm
+            item={editItem}
+            projectTypes={projectTypes}
+            projectRubricas={projectRubricas}
+            onSave={handleSave}
+            onCancel={()=>setEditItem(null)}
+          />
+        </Modal>
+      )}
+
+      {delId && (
+        <Confirm
+          msg="Tem certeza que deseja excluir este item? Essa ação não pode ser desfeita."
+          onYes={()=>{ onDelete(delId); setDelId(null); toast('Item excluído.','error'); }}
+          onNo={()=>setDelId(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── PAYMENTS TAB ────────────────────────────────────────────────────────────
+
+function PaymentsTab({ items, projectTypes, onTogglePaid, toast }) {
+  const [filter, setFilter] = useState('all');
+  const shown = filter==='all' ? items : items.filter(i=>filter==='paid'?i.pago:!i.pago);
+  const sorted = [...shown].sort((a,b)=>(a.data_solicitacao||'').localeCompare(b.data_solicitacao||''));
+
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-2 flex-wrap">
+        {[['all','Todos'],['pending','Pendentes'],['paid','Pagos']].map(([v,l])=>(
+          <button
+            key={v}
+            onClick={()=>setFilter(v)}
+            className={`px-4 py-1.5 rounded-full text-sm font-medium transition ${filter===v?'bg-blue-600 text-white':'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+          >
+            {l} ({v==='all'?items.length:v==='paid'?items.filter(i=>i.pago).length:items.filter(i=>!i.pago).length})
+          </button>
+        ))}
+      </div>
+
+      <div className="space-y-2">
+        {sorted.length===0 && <div className="text-center py-10 text-slate-400">Nenhum item nesta categoria</div>}
+
+        {sorted.map(item=>{
+          const st=itemStatus(item);
+          return (
+            <div
+              key={item.id}
+              className={`bg-white rounded-xl border p-4 flex flex-wrap items-center gap-4 transition
+                ${st==='atrasado'?'border-red-200':st==='pago'?'border-emerald-100':'border-slate-100'}`}
+            >
+              <div className="flex-1 min-w-[180px]">
+                <div className="flex items-center gap-2 flex-wrap mb-0.5">
+                  <TypeBadge nome={item.tipo_item} projectTypes={projectTypes} />
+                </div>
+                <div className="font-medium text-sm text-slate-800 mt-1">{item.descricao}</div>
+                <div className="text-xs text-slate-400">{item.fornecedor||'–'}</div>
+              </div>
+
+              <div className="text-center">
+                <div className="text-xs text-slate-400">Aprovado</div>
+                <div className="font-semibold text-sm">{fmtCurrency(item.valor_total_aprovado)}</div>
+              </div>
+
+              <div className="text-center">
+                <div className="text-xs text-slate-400">Pago</div>
+                <div className="font-semibold text-sm text-emerald-700">{fmtCurrency(item.valor_total_pago)}</div>
+              </div>
+
+              <div className="text-center">
+                <div className="text-xs text-slate-400">Prev. Entrega</div>
+                <div className={`text-sm font-medium ${isLate(item)&&!item.pago?'text-red-600':''}`}>{fmtDate(item.previsao_entrega)}</div>
+              </div>
+
+              <div className="text-center">
+                <div className="text-xs text-slate-400">NF</div>
+                <div className="text-sm">{item.nf||'–'}</div>
+              </div>
+
+              <StatusBadge status={st} />
+
+              <button
+                onClick={()=>{ onTogglePaid(item.id); toast(item.pago?'Marcado como pendente.':'Marcado como pago!'); }}
+                className={`px-3 py-1.5 text-xs rounded-lg font-medium transition ${item.pago?'bg-amber-50 text-amber-700 hover:bg-amber-100':'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'}`}
+              >
+                {item.pago?'↩ Desfazer':'✓ Confirmar Pgto'}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── SUPPLIERS TAB ───────────────────────────────────────────────────────────
+
+function SuppliersTab({ items, projectTypes }) {
+  const data = useMemo(()=>{
+    const map={};
+    items.forEach(i=>{
+      const k=i.fornecedor||'(sem fornecedor)';
+      if (!map[k]) map[k]={nome:k,pedidos:0,aprov:0,pago:0,itens:[]};
+      map[k].pedidos++;
+      map[k].aprov+=i.valor_total_aprovado;
+      map[k].pago+=i.valor_total_pago;
+      map[k].itens.push(i);
+    });
+    return Object.values(map).sort((a,b)=>b.aprov-a.aprov);
+  },[items]);
+
+  if (!data.length) return <div className="text-center py-16 text-slate-400">Nenhum fornecedor cadastrado ainda.</div>;
+
+  return (
+    <div className="space-y-3">
+      {data.map(s=>(
+        <div key={s.nome} className="bg-white rounded-xl border border-slate-100 p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
+            <div>
+              <div className="font-semibold text-slate-800">{s.nome}</div>
+              <div className="text-xs text-slate-400 mt-0.5">{s.pedidos} {s.pedidos===1?'pedido':'pedidos'}</div>
+            </div>
+
+            <div className="flex gap-4 text-right">
+              <div>
+                <div className="text-xs text-slate-400">Total Aprovado</div>
+                <div className="font-bold text-blue-700">{fmtCurrency(s.aprov)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-400">Total Pago</div>
+                <div className="font-bold text-emerald-700">{fmtCurrency(s.pago)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-400">Saldo</div>
+                <div className={`font-bold ${s.aprov-s.pago<0?'text-red-600':'text-amber-700'}`}>{fmtCurrency(s.aprov-s.pago)}</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="w-full bg-slate-100 rounded-full h-1.5 mb-3">
+            <div className="bg-emerald-500 h-1.5 rounded-full transition-all" style={{width:s.aprov>0?Math.min(100,(s.pago/s.aprov*100))+'%':'0%'}} />
+          </div>
+
+          <div className="flex flex-wrap gap-1.5">
+            {s.itens.map(i=>(
+              <span
+                key={i.id}
+                className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border ${getTypeColor(i.tipo_item,projectTypes).bg} ${getTypeColor(i.tipo_item,projectTypes).text}`}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${getTypeColor(i.tipo_item,projectTypes).dot}`} />
+                {i.descricao} · {fmtCurrency(i.valor_total_aprovado)}
+              </span>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── REPORTS TAB ─────────────────────────────────────────────────────────────
+
+function ReportsTab({ project, items, projectTypes }) {
+  const totalAprov = items.reduce((s,i)=>s+i.valor_total_aprovado,0);
+  const totalPago  = items.reduce((s,i)=>s+i.valor_total_pago,0);
+  const saldo      = totalAprov - totalPago;
+
+  const byTipo = useMemo(()=>{
+    const m={};
+    items.forEach(i=>{
+      if(!m[i.tipo_item]) m[i.tipo_item]={aprov:0,pago:0,qtd:0};
+      m[i.tipo_item].aprov+=i.valor_total_aprovado;
+      m[i.tipo_item].pago+=i.valor_total_pago;
+      m[i.tipo_item].qtd++;
+    });
+    return m;
+  },[items]);
+
+  const byRubrica = useMemo(()=>{
+    const m={};
+    items.forEach(i=>{
+      if(!m[i.rubrica]) m[i.rubrica]={aprov:0,pago:0,qtd:0};
+      m[i.rubrica].aprov+=i.valor_total_aprovado;
+      m[i.rubrica].pago+=i.valor_total_pago;
+      m[i.rubrica].qtd++;
+    });
+    return m;
+  },[items]);
+
+  const Section = ({title,children}) => (
+    <div className="bg-white rounded-xl border border-slate-100 overflow-hidden">
+      <div className="bg-slate-50 px-5 py-3 border-b border-slate-100">
+        <h3 className="font-semibold text-slate-700 text-sm">{title}</h3>
+      </div>
+      <div className="p-5">{children}</div>
+    </div>
+  );
+
+  const thR = "text-xs font-semibold text-slate-400 uppercase py-2";
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-xl p-5 text-white">
+        <div className="text-xs uppercase opacity-75 mb-1">Relatório Financeiro</div>
+        <div className="text-xl font-bold">{project.nome}</div>
+        <div className="text-sm opacity-80 mt-1">{project.coordenador} · {project.instituicao}</div>
+        <div className="text-xs opacity-60 mt-0.5">Gerado em {fmtDate(todayISO())}</div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3">
+        <StatCard label="Total Aprovado" value={fmtCurrency(totalAprov)} color="blue" />
+        <StatCard label="Total Pago" value={fmtCurrency(totalPago)} color="green" />
+        <StatCard label="Saldo Restante" value={fmtCurrency(saldo)} color={saldo<0?'red':'amber'} />
+      </div>
+
+      <Section title="Resumo por Tipo de Item">
+        <table className="w-full">
+          <thead>
+            <tr>
+              <th className={thR+" text-left"}>Tipo</th>
+              <th className={thR+" text-center"}>Qtd</th>
+              <th className={thR+" text-right"}>Aprovado</th>
+              <th className={thR+" text-right"}>Pago</th>
+              <th className={thR+" text-right"}>Saldo</th>
+            </tr>
+          </thead>
+          <tbody>
+            {Object.entries(byTipo).map(([t,v])=>(
+              <tr key={t} className="border-b border-slate-50 hover:bg-slate-50">
+                <td className="py-2"><TypeBadge nome={t} projectTypes={projectTypes} /></td>
+                <td className="py-2 text-sm text-center text-slate-500">{v.qtd}</td>
+                <td className="py-2 text-sm text-right font-medium">{fmtCurrency(v.aprov)}</td>
+                <td className="py-2 text-sm text-right text-emerald-700 font-medium">{fmtCurrency(v.pago)}</td>
+                <td className={`py-2 text-sm text-right font-semibold ${v.aprov-v.pago<0?'text-red-600':'text-amber-700'}`}>{fmtCurrency(v.aprov-v.pago)}</td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr className="bg-slate-50">
+              <td className="py-2 font-bold text-sm">Total</td>
+              <td className="py-2 text-center text-sm">{items.length}</td>
+              <td className="py-2 text-right font-bold text-sm">{fmtCurrency(totalAprov)}</td>
+              <td className="py-2 text-right font-bold text-sm text-emerald-700">{fmtCurrency(totalPago)}</td>
+              <td className={`py-2 text-right font-bold text-sm ${saldo<0?'text-red-600':'text-amber-700'}`}>{fmtCurrency(saldo)}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </Section>
+
+      <Section title="Resumo por Rubrica">
+        <table className="w-full">
+          <thead>
+            <tr>
+              <th className={thR+" text-left"}>Rubrica</th>
+              <th className={thR+" text-center"}>Itens</th>
+              <th className={thR+" text-right"}>Aprovado</th>
+              <th className={thR+" text-right"}>Pago</th>
+              <th className={thR+" text-right"}>Saldo</th>
+            </tr>
+          </thead>
+          <tbody>
+            {Object.entries(byRubrica).map(([r,v])=>(
+              <tr key={r} className="border-b border-slate-50 hover:bg-slate-50">
+                <td className="py-2 text-sm text-slate-700">{r}</td>
+                <td className="py-2 text-sm text-center text-slate-500">{v.qtd}</td>
+                <td className="py-2 text-sm text-right font-medium">{fmtCurrency(v.aprov)}</td>
+                <td className="py-2 text-sm text-right text-emerald-700 font-medium">{fmtCurrency(v.pago)}</td>
+                <td className={`py-2 text-sm text-right font-semibold ${v.aprov-v.pago<0?'text-red-600':'text-amber-700'}`}>{fmtCurrency(v.aprov-v.pago)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Section>
+
+      <Section title="Status dos Itens">
+        {[['pago','Pagos'],['pendente','Pendentes'],['atrasado','Atrasados']].map(([st,lbl])=>{
+          const n=items.filter(i=>itemStatus(i)===st).length;
+          return (
+            <div key={st} className="flex items-center justify-between py-2 border-b border-slate-50 last:border-0">
+              <StatusBadge status={st}/>
+              <span className="text-sm font-semibold text-slate-700">{n} {n===1?'item':'itens'}</span>
+            </div>
+          );
+        })}
+      </Section>
+
+      <div className="flex justify-end no-print">
+        <button onClick={()=>window.print()} className="flex items-center gap-2 px-4 py-2 text-sm bg-slate-700 text-white rounded-lg hover:bg-slate-800 font-medium">
+          🖨 Imprimir Relatório
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── EXPORT TAB ──────────────────────────────────────────────────────────────
+
+function ExportTab({
+  project,
+  items,
+  projectTypes,
+  projectRubricas,
+  onImportItems,
+  onImportTypes,
+  onImportRubricas,
+  toast
+}) {
+  const exportExcel = () => {
+    try {
+      const wb = XLSX.utils.book_new();
+      const header = [
+        ['CONTROLE FINANCEIRO DE PROJETO'],
+        [`Projeto: ${project.nome}`],
+        [`Coordenador: ${project.coordenador}`],
+        [`Instituição: ${project.instituicao}`],
+        [`Tipo: ${project.tipo}`],
+        [`Data de Criação: ${fmtDate(project.data_criacao)}`],
+        [`Exportado em: ${fmtDate(todayISO())}`],
+        [],
+        ['Tipo','Descrição','Qtd','V.Unit.Aprov (R$)','V.Total.Aprov (R$)','Rubrica','V.Unit.Pago (R$)','V.Total.Pago (R$)','Saldo (R$)','Nº Pedido/OF','Data Solicitação','Fornecedor','Prev. Entrega','NF','Pago?','Observações'],
+        ...items.map(i=>[
+          i.tipo_item,
+          i.descricao,
+          i.quantidade,
+          i.valor_unitario_aprovado,
+          i.valor_total_aprovado,
+          i.rubrica,
+          i.valor_unitario_pago,
+          i.valor_total_pago,
+          i.saldo,
+          i.numero_pedido_of,
+          fmtDate(i.data_solicitacao),
+          i.fornecedor,
+          fmtDate(i.previsao_entrega),
+          i.nf,
+          i.pago?'Sim':'Não',
+          i.observacoes
+        ]),
+        [],
+        ['','','','TOTAL APROVADO:',items.reduce((s,i)=>s+i.valor_total_aprovado,0),'','','TOTAL PAGO:',items.reduce((s,i)=>s+i.valor_total_pago,0)],
+      ];
+      const ws = XLSX.utils.aoa_to_sheet(header);
+      ws['!cols'] = [8,30,6,14,14,10,14,14,12,12,12,20,12,10,6,25].map(w=>({wch:w}));
+      XLSX.utils.book_append_sheet(wb, ws, 'Itens');
+
+      const resumoTipos = [
+        ['RESUMO POR TIPO'],
+        ['Tipo','Orçamento','Total dos Itens','Saldo']
+      ];
+      projectTypes.forEach(t => {
+        const totalTipo = items.filter(i => i.tipo_item === t.nome).reduce((s,i)=>s+i.valor_total_aprovado,0);
+        resumoTipos.push([t.nome, t.orcamento || 0, totalTipo, (Number(t.orcamento)||0)-totalTipo]);
+      });
+      const ws2 = XLSX.utils.aoa_to_sheet(resumoTipos);
+      XLSX.utils.book_append_sheet(wb, ws2, 'Resumo por Tipo');
+
+      const resumoRubricas = [
+        ['RUBRICAS DO PROJETO'],
+        ['Rubrica','Qtd Itens','Total Aprovado']
+      ];
+      projectRubricas.forEach(r => {
+        const itensDaRubrica = items.filter(i => i.rubrica === r.nome);
+        const total = itensDaRubrica.reduce((s,i)=>s+i.valor_total_aprovado,0);
+        resumoRubricas.push([r.nome, itensDaRubrica.length, total]);
+      });
+      const ws3 = XLSX.utils.aoa_to_sheet(resumoRubricas);
+      XLSX.utils.book_append_sheet(wb, ws3, 'Rubricas');
+
+      XLSX.writeFile(wb, `${project.nome.replace(/[^a-zA-Z0-9 ]/g,'_')} - Financeiro.xlsx`);
+      toast('Planilha Excel exportada!');
+    } catch(e) {
+      toast('Erro: '+e.message,'error');
+    }
+  };
+
+  const exportPDF = () => {
+    try {
+      const {jsPDF}=window.jspdf;
+      const doc=new jsPDF({orientation:'landscape',unit:'mm',format:'a4'});
+      const pw=doc.internal.pageSize.getWidth();
+      doc.setFillColor(37,99,235);
+      doc.rect(0,0,pw,28,'F');
+
+      doc.setTextColor(255,255,255);
+      doc.setFontSize(14);
+      doc.setFont(undefined,'bold');
+      doc.text('CONTROLE FINANCEIRO DE PROJETO',pw/2,10,{align:'center'});
+      doc.setFontSize(10);
+      doc.setFont(undefined,'normal');
+      doc.text(project.nome,pw/2,17,{align:'center'});
+      doc.setFontSize(8);
+      doc.text(`${project.coordenador}  ·  ${project.instituicao}  ·  ${project.tipo}`,pw/2,23,{align:'center'});
+
+      doc.setTextColor(0,0,0);
+      const tA=items.reduce((s,i)=>s+i.valor_total_aprovado,0), tP=items.reduce((s,i)=>s+i.valor_total_pago,0);
+      doc.text(`Total Aprovado: ${fmtCurrency(tA)}    Total Pago: ${fmtCurrency(tP)}    Saldo: ${fmtCurrency(tA-tP)}    Exportado: ${fmtDate(todayISO())}`,14,34);
+
+      doc.autoTable({
+        startY:38,
+        head:[['Tipo','Descrição','Qtd','V.Aprov','Rubrica','V.Pago','Saldo','Pedido/OF','Solicitação','Fornecedor','Prev.Entrega','NF','Pago?']],
+        body:items.map(i=>[
+          i.tipo_item,
+          i.descricao,
+          i.quantidade,
+          fmtCurrency(i.valor_total_aprovado),
+          i.rubrica,
+          fmtCurrency(i.valor_total_pago),
+          fmtCurrency(i.saldo),
+          i.numero_pedido_of||'–',
+          fmtDate(i.data_solicitacao),
+          i.fornecedor||'–',
+          fmtDate(i.previsao_entrega),
+          i.nf||'–',
+          i.pago?'Sim':'Não'
+        ]),
+        styles:{fontSize:7,cellPadding:2},
+        headStyles:{fillColor:[37,99,235],fontSize:7,fontStyle:'bold'},
+        alternateRowStyles:{fillColor:[248,250,252]},
+        columnStyles:{1:{cellWidth:35},9:{cellWidth:28},3:{halign:'right'},5:{halign:'right'},6:{halign:'right'}},
+        didParseCell:d=>{
+          if(d.section==='body'){
+            const it=items[d.row.index];
+            if(it&&d.column.index===12){
+              const st=itemStatus(it);
+              if(st==='pago') d.cell.styles.textColor=[5,150,105];
+              else if(st==='atrasado') d.cell.styles.textColor=[220,38,38];
+              else d.cell.styles.textColor=[180,120,0];
+            }
+          }
+        }
+      });
+
+      doc.save(`${project.nome.replace(/[^a-zA-Z0-9 ]/g,'_')} - Financeiro.pdf`);
+      toast('PDF exportado!');
+    } catch(e) {
+      toast('Erro: '+e.message,'error');
+    }
+  };
+
+  const importExcel = async (file) => {
+    try {
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data, { type: 'array' });
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+      const json = XLSX.utils.sheet_to_json(firstSheet, { defval: '' });
+
+      if (!json.length) {
+        toast('A planilha está vazia.', 'error');
+        return;
+      }
+
+      const normalize = str =>
+        String(str || '')
+          .trim()
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '');
+
+      const getValue = (row, possibleKeys) => {
+        const rowKeys = Object.keys(row);
+        for (const wanted of possibleKeys) {
+          const found = rowKeys.find(k => normalize(k) === normalize(wanted));
+          if (found) return row[found];
+        }
+        return '';
+      };
+
+      const importedItems = json.map(row => {
+        const tipo_item = String(getValue(row, ['Tipo', 'Tipo do item', 'tipo_item']) || '').trim();
+        const descricao = String(getValue(row, ['Descrição', 'Descricao', 'Descrição do item', 'descricao']) || '').trim();
+        const quantidade = Number(getValue(row, ['Qtd', 'Quantidade', 'quantidade'])) || 0;
+        const valor_unitario_aprovado = currencyToNumber(getValue(row, ['V.Unit.Aprov (R$)', 'Valor unitário aprovado', 'valor_unitario_aprovado']));
+        const valor_unitario_pago = currencyToNumber(getValue(row, ['V.Unit.Pago (R$)', 'Valor unitário pago', 'valor_unitario_pago']));
+        const valor_total_aprovado = quantidade * valor_unitario_aprovado;
+        const valor_total_pago = quantidade * valor_unitario_pago;
+        const rubrica = String(getValue(row, ['Rubrica', 'rubrica']) || '').trim();
+        const saldo = valor_total_aprovado - valor_total_pago;
+        const numero_pedido_of = String(getValue(row, ['Nº Pedido/OF', 'Nº Pedido e OF', 'numero_pedido_of']) || '').trim();
+        const data_solicitacao = normalizeDateInput(getValue(row, ['Data Solicitação', 'Data da solicitação', 'data_solicitacao']));
+        const fornecedor = String(getValue(row, ['Fornecedor', 'fornecedor']) || '').trim();
+        const previsao_entrega = normalizeDateInput(getValue(row, ['Prev. Entrega', 'Previsão de entrega', 'previsao_entrega']));
+        const nf = String(getValue(row, ['NF', 'nf']) || '').trim();
+        const pagoRaw = String(getValue(row, ['Pago?', 'Pago', 'pago']) || '').trim().toLowerCase();
+        const pago = ['sim', 'true', '1', 'pago'].includes(pagoRaw);
+        const observacoes = String(getValue(row, ['Observações', 'Observacoes', 'observacoes']) || '').trim();
+
+        return {
+          id: genId(),
+          projeto_id: project.id,
+          tipo_item,
+          descricao,
+          quantidade,
+          valor_unitario_aprovado,
+          valor_total_aprovado,
+          rubrica,
+          valor_unitario_pago,
+          valor_total_pago,
+          saldo,
+          numero_pedido_of,
+          data_solicitacao,
+          fornecedor,
+          previsao_entrega,
+          nf,
+          pago,
+          observacoes
+        };
+      }).filter(item => item.descricao);
+
+      const novosTipos = [...new Set(importedItems.map(i => i.tipo_item).filter(Boolean))]
+        .filter(nome => !projectTypes.some(t => t.nome === nome))
+        .map((nome, idx) => ({
+          id: genId(),
+          nome,
+          cor: autoColor(projectTypes.length + idx),
+          orcamento: 0
+        }));
+
+      const novasRubricas = [...new Set(importedItems.map(i => i.rubrica).filter(Boolean))]
+        .filter(nome => !projectRubricas.some(r => r.nome === nome))
+        .map(nome => ({ id: genId(), nome }));
+
+      onImportItems(importedItems);
+      if (novosTipos.length) onImportTypes([...projectTypes, ...novosTipos]);
+      if (novasRubricas.length) onImportRubricas([...projectRubricas, ...novasRubricas]);
+
+      toast(`Importação concluída! ${importedItems.length} itens carregados.`);
+    } catch (e) {
+      toast('Erro ao importar Excel: ' + e.message, 'error');
+    }
+  };
+
+  const Card = ({icon,title,desc,onClick,color}) => (
+    <button
+      onClick={onClick}
+      className={`flex flex-col items-center gap-3 p-8 rounded-2xl border-2 transition hover:shadow-md w-full ${color==='green'?'border-emerald-200 hover:border-emerald-400 hover:bg-emerald-50':'border-blue-200 hover:border-blue-400 hover:bg-blue-50'}`}
+    >
+      <span className="text-4xl">{icon}</span>
+      <div className="text-center">
+        <div className="font-bold text-slate-800">{title}</div>
+        <div className="text-sm text-slate-500 mt-1">{desc}</div>
+      </div>
+    </button>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-sm text-blue-700">
+        <strong>📤 Exportação e importação:</strong> você pode exportar os <strong>{items.length} itens</strong> do projeto <strong>{project.nome}</strong>
+         ou importar uma planilha Excel com colunas parecidas com o sistema.
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <label className="flex flex-col items-center gap-3 p-8 rounded-2xl border-2 transition hover:shadow-md w-full border-purple-200 hover:border-purple-400 hover:bg-purple-50 cursor-pointer">
+          <span className="text-4xl">📥</span>
+          <div className="text-center">
+            <div className="font-bold text-slate-800">Importar Excel (.xlsx)</div>
+            <div className="text-sm text-slate-500 mt-1">
+              Importa itens da planilha e cria tipos/rubricas automaticamente.
+            </div>
+          </div>
+          <input
+            type="file"
+            accept=".xlsx,.xls"
+            className="hidden"
+            onChange={e => {
+              const file = e.target.files?.[0];
+              if (file) importExcel(file);
+              e.target.value = '';
+            }}
+          />
+        </label>
+
+        <Card
+          icon="📊"
+          title="Exportar para Excel (.xlsx)"
+          color="green"
+          desc="Planilha completa com todos os campos e resumo por tipo."
+          onClick={exportExcel}
+        />
+
+        <Card
+          icon="📄"
+          title="Exportar para PDF"
+          color="blue"
+          desc="Relatório formatado, ideal para impressão e arquivamento."
+          onClick={exportPDF}
+        />
+      </div>
+
+      <div className="bg-white rounded-xl border border-slate-100 p-5">
+        <h3 className="font-semibold text-slate-700 mb-3 text-sm">Pré-visualização</h3>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {[
+            [items.length,'Total de itens','slate'],
+            [items.filter(i=>i.pago).length,'Pagos','green'],
+            [fmtCurrency(items.reduce((s,i)=>s+i.valor_total_aprovado,0)),'Total aprovado','amber'],
+            [fmtCurrency(items.reduce((s,i)=>s+i.valor_total_pago,0)),'Total pago','blue']
+          ].map(([v,l,c])=>(
+            <div key={l} className={`text-center p-3 rounded-lg ${c==='green'?'bg-emerald-50':c==='amber'?'bg-amber-50':c==='blue'?'bg-blue-50':'bg-slate-50'}`}>
+              <div className={`text-xl font-bold ${c==='green'?'text-emerald-700':c==='amber'?'text-amber-700':c==='blue'?'text-blue-700':'text-slate-700'}`}>{v}</div>
+              <div className="text-xs text-slate-500 mt-1">{l}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── PROJECT DETAIL ──────────────────────────────────────────────────────────
+
+function ProjectDetail({
+  project,
+  items,
+  projectTypes,
+  projectRubricas,
+  onBack,
+  onUpdateItems,
+  onUpdateTypes,
+  onUpdateRubricas,
+  onEditProject,
+  toast
+}) {
+  const [tab, setTab] = useState('overview');
+
+  const recalc = data => {
+    const vta = (Number(data.quantidade)||0)*(Number(data.valor_unitario_aprovado)||0);
+    const vtp = (Number(data.quantidade)||0)*(Number(data.valor_unitario_pago)||0);
+    return { ...data, valor_total_aprovado:vta, valor_total_pago:vtp, saldo:vta-vtp };
+  };
+
+  const addItem = (data, novoTipo) => {
+    if (novoTipo && !projectTypes.some(t=>t.nome===novoTipo)) {
+      onUpdateTypes([...projectTypes, { id:genId(), nome:novoTipo, cor:autoColor(projectTypes.length), orcamento:0 }]);
+    }
+    onUpdateItems([...items, { ...recalc(data), id:genId(), projeto_id:project.id }]);
+  };
+
+  const editItem = (data, novoTipo) => {
+    if (novoTipo && !projectTypes.some(t=>t.nome===novoTipo)) {
+      onUpdateTypes([...projectTypes, { id:genId(), nome:novoTipo, cor:autoColor(projectTypes.length), orcamento:0 }]);
+    }
+    onUpdateItems(items.map(i => i.id===data.id ? recalc(data) : i));
+  };
+
+  const deleteItem = id => onUpdateItems(items.filter(i=>i.id!==id));
+
+  const togglePaid = id => {
+    onUpdateItems(items.map(i=>{
+      if (i.id!==id) return i;
+      const pago=!i.pago, vtp=pago?i.valor_total_aprovado:0;
+      return {
+        ...i,
+        pago,
+        valor_unitario_pago:pago?i.valor_unitario_aprovado:0,
+        valor_total_pago:vtp,
+        saldo:i.valor_total_aprovado-vtp
+      };
+    }));
+  };
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex items-center gap-3 mb-5 flex-wrap">
+        <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-800 px-2 py-1.5 rounded-lg hover:bg-slate-100">← Voltar</button>
+
+        <div className="flex-1">
+          <h1 className="text-xl font-bold text-slate-800 leading-tight">{project.nome}</h1>
+          <div className="text-xs text-slate-400 mt-0.5">{project.tipo} · {project.instituicao}</div>
+        </div>
+
+        <button onClick={()=>onEditProject(project)} className="flex items-center gap-1.5 px-3 py-2 text-sm border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-600">
+          ✏ Editar Projeto
+        </button>
+      </div>
+
+      <div className="flex flex-wrap gap-1.5 mb-5 pb-1 border-b border-slate-100 no-print">
+        {TABS.map(t=>(
+          <button
+            key={t}
+            onClick={()=>setTab(t)}
+            className={`flex items-center gap-1.5 px-3 py-2 text-sm rounded-xl font-medium transition
+              ${tab===t?'bg-blue-600 text-white shadow-sm':'text-slate-600 hover:bg-slate-100'}`}
+          >
+            <span>{TAB_ICONS[t]}</span><span>{TAB_LABELS[t]}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="flex-1">
+        {tab==='overview' && <OverviewTab project={project} items={items} projectTypes={projectTypes} />}
+
+        {tab==='types' && (
+          <TypesTab
+            projectTypes={projectTypes}
+            items={items}
+            onUpdateTypes={onUpdateTypes}
+            toast={toast}
+          />
+        )}
+
+        {tab==='rubricas' && (
+          <RubricasTab
+            rubricas={projectRubricas}
+            items={items}
+            onUpdateRubricas={onUpdateRubricas}
+            toast={toast}
+          />
+        )}
+
+        {tab==='items' && (
+          <ItemsTab
+            items={items}
+            projectTypes={projectTypes}
+            projectRubricas={projectRubricas}
+            onAdd={addItem}
+            onEdit={editItem}
+            onDelete={deleteItem}
+            onAddType={t=>onUpdateTypes([...projectTypes,t])}
+            toast={toast}
+          />
+        )}
+
+        {tab==='payments' && (
+          <PaymentsTab items={items} projectTypes={projectTypes} onTogglePaid={togglePaid} toast={toast} />
+        )}
+
+        {tab==='suppliers' && <SuppliersTab items={items} projectTypes={projectTypes} />}
+
+        {tab==='reports' && <ReportsTab project={project} items={items} projectTypes={projectTypes} />}
+
+        {tab==='export' && (
+          <ExportTab
+            project={project}
+            items={items}
+            projectTypes={projectTypes}
+            projectRubricas={projectRubricas}
+            onImportItems={onUpdateItems}
+            onImportTypes={onUpdateTypes}
+            onImportRubricas={onUpdateRubricas}
+            toast={toast}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── DASHBOARD ───────────────────────────────────────────────────────────────
+
+function Dashboard({ projects, allItems, allTypes, onOpen, onCreate, onEdit, onDelete, toast }) {
+  const [search, setSearch] = useState('');
+  const [typeFilter, setTypeFilter] = useState('');
+  const [delId, setDelId] = useState(null);
+
+  const filtered = useMemo(()=>{
+    let r = projects;
+    if (search) {
+      r = r.filter(p =>
+        p.nome.toLowerCase().includes(search.toLowerCase()) ||
+        (p.coordenador||'').toLowerCase().includes(search.toLowerCase()) ||
+        (p.instituicao||'').toLowerCase().includes(search.toLowerCase())
+      );
+    }
+    if (typeFilter) r = r.filter(p=>p.tipo===typeFilter);
+    return [...r].sort((a,b)=>(b.criado_em||'').localeCompare(a.criado_em||''));
+  },[projects,search,typeFilter]);
+
+  const allItemsList = Object.values(allItems).flat();
+  const totalAprov   = allItemsList.reduce((s,i)=>s+i.valor_total_aprovado,0);
+  const totalPago    = allItemsList.reduce((s,i)=>s+i.valor_total_pago,0);
+  const atrasados    = allItemsList.filter(i=>itemStatus(i)==='atrasado').length;
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center gap-4 justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-800">Projetos</h1>
+          <p className="text-slate-500 text-sm mt-0.5">{projects.length} {projects.length===1?'projeto':'projetos'} cadastrado{projects.length===1?'':'s'}</p>
+        </div>
+        <button onClick={onCreate} className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 font-medium text-sm shadow-sm">
+          + Novo Projeto
+        </button>
+      </div>
+
+      {projects.length > 0 && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <StatCard label="Projetos Ativos" value={projects.length} color="blue" icon="📁" />
+          <StatCard label="Total Aprovado (Geral)" value={fmtCurrency(totalAprov)} color="purple" icon="💼" />
+          <StatCard label="Total Pago (Geral)" value={fmtCurrency(totalPago)} color="green" icon="✅" />
+          <StatCard label="Itens Atrasados" value={atrasados} color={atrasados>0?'red':'green'} icon={atrasados>0?'⚠️':'✓'} />
+        </div>
+      )}
+
+      {projects.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          <div className="relative flex-1 min-w-[200px]">
+            <span className="absolute left-3 top-2.5 text-slate-400">🔍</span>
+            <input
+              className="w-full pl-8 pr-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Buscar por nome, coordenador ou instituição..."
+              value={search}
+              onChange={e=>setSearch(e.target.value)}
+            />
+          </div>
+
+          <select
+            className="text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            value={typeFilter}
+            onChange={e=>setTypeFilter(e.target.value)}
+          >
+            <option value="">Todos os tipos</option>
+            {[...new Set(projects.map(p=>p.tipo))].map(t=><option key={t}>{t}</option>)}
+          </select>
+        </div>
+      )}
+
+      {projects.length===0 ? (
+        <div className="text-center py-24 text-slate-400">
+          <div className="text-6xl mb-4">📁</div>
+          <div className="text-lg font-medium text-slate-600">Nenhum projeto ainda</div>
+          <div className="text-sm mt-1 mb-6">Crie seu primeiro projeto para começar a controlar os financeiros</div>
+          <button onClick={onCreate} className="px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 font-medium text-sm">
+            + Criar primeiro projeto
+          </button>
+        </div>
+      ) : filtered.length===0 ? (
+        <div className="text-center py-12 text-slate-400">
+          <div className="text-3xl mb-2">🔍</div>
+          <div>Nenhum projeto encontrado para "<strong>{search}</strong>"</div>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {filtered.map(p=>{
+            const itens = allItems[p.id] || [];
+            const tipos = allTypes[p.id] || [];
+            const aprov = itens.reduce((s,i)=>s+i.valor_total_aprovado,0);
+            const pago  = itens.reduce((s,i)=>s+i.valor_total_pago,0);
+            const pct   = aprov>0?Math.min(100,(pago/aprov*100)):0;
+            const late  = itens.filter(i=>itemStatus(i)==='atrasado').length;
+            const tiposCount = tipos.length;
+
+            return (
+              <div key={p.id} className="bg-white rounded-2xl border border-slate-100 hover:shadow-md transition-shadow overflow-hidden group">
+                <div className="p-5 cursor-pointer" onClick={()=>onOpen(p)}>
+                  <div className="flex items-start justify-between gap-2 mb-3">
+                    <div className="flex-1">
+                      <div className="font-bold text-slate-800 text-base leading-tight group-hover:text-blue-700 transition-colors">{p.nome}</div>
+                      <div className="text-xs text-slate-400 mt-1">{p.coordenador}</div>
+                      <div className="text-xs text-slate-400">{p.instituicao}</div>
+                    </div>
+                    <span className="shrink-0 text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded-full font-medium">{p.tipo}</span>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2 mb-3 text-center">
+                    <div className="bg-slate-50 rounded-lg p-2">
+                      <div className="text-xs text-slate-400">Aprovado</div>
+                      <div className="text-xs font-bold text-slate-700">{fmtCurrency(aprov)}</div>
+                    </div>
+                    <div className="bg-emerald-50 rounded-lg p-2">
+                      <div className="text-xs text-slate-400">Pago</div>
+                      <div className="text-xs font-bold text-emerald-700">{fmtCurrency(pago)}</div>
+                    </div>
+                    <div className="bg-amber-50 rounded-lg p-2">
+                      <div className="text-xs text-slate-400">Saldo</div>
+                      <div className={`text-xs font-bold ${aprov-pago<0?'text-red-600':'text-amber-700'}`}>{fmtCurrency(aprov-pago)}</div>
+                    </div>
+                  </div>
+
+                  <div className="mb-2">
+                    <div className="flex justify-between text-xs text-slate-400 mb-1">
+                      <span>{itens.length} itens · {tiposCount} tipos</span>
+                      <span>{pct.toFixed(0)}% pago</span>
+                    </div>
+                    <div className="w-full bg-slate-100 rounded-full h-1.5">
+                      <div className="bg-blue-500 h-1.5 rounded-full transition-all" style={{width:pct+'%'}} />
+                    </div>
+                  </div>
+
+                  {late>0 && <div className="text-xs text-red-600 flex items-center gap-1"><span>⚠</span><span>{late} {late===1?'item atrasado':'itens atrasados'}</span></div>}
+                  <div className="text-xs text-slate-400 mt-1">Criado em {fmtDate(p.data_criacao)}</div>
+                </div>
+
+                <div className="flex items-center gap-1 px-4 py-2.5 bg-slate-50 border-t border-slate-100">
+                  <button onClick={()=>onOpen(p)} className="flex-1 text-xs text-blue-600 hover:text-blue-800 font-medium py-1">Abrir →</button>
+                  <div className="w-px h-4 bg-slate-200" />
+                  <button onClick={()=>onEdit(p)} className="px-2 py-1 text-xs text-slate-500 hover:text-slate-800 rounded-lg hover:bg-white" title="Editar">✏</button>
+                  <button onClick={()=>setDelId(p.id)} className="px-2 py-1 text-xs text-red-400 hover:text-red-600 rounded-lg hover:bg-white" title="Excluir">🗑</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {delId && (
+        <Confirm
+          msg="Deseja excluir este projeto e todos os seus itens? Esta ação não pode ser desfeita."
+          onYes={()=>{ onDelete(delId); setDelId(null); toast('Projeto excluído.','error'); }}
+          onNo={()=>setDelId(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── SIDEBAR ─────────────────────────────────────────────────────────────────
+
+function Sidebar({ view, onNavigate, projects, currentProjectId, sideOpen, setSideOpen }) {
+  return (
+    <>
+      {sideOpen && <div className="fixed inset-0 bg-black/30 z-20 lg:hidden" onClick={()=>setSideOpen(false)} />}
+
+      <aside className={`fixed lg:static inset-y-0 left-0 z-30 w-64 bg-white border-r border-slate-100 flex flex-col transition-transform duration-200 ${sideOpen?'translate-x-0':'-translate-x-full lg:translate-x-0'}`}>
+        <div className="px-5 py-5 border-b border-slate-100">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold text-sm">LF</div>
+            <div>
+              <div className="font-bold text-slate-800 text-sm">LabFinance</div>
+              <div className="text-xs text-slate-400">Gestor Financeiro</div>
+            </div>
+          </div>
+        </div>
+
+        <nav className="flex-1 px-3 py-4 overflow-y-auto">
+          <button
+            onClick={()=>{ onNavigate('dashboard'); setSideOpen(false); }}
+            className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm font-medium mb-1 transition ${view==='dashboard'?'bg-blue-600 text-white':'text-slate-600 hover:bg-slate-100'}`}
+          >
+            <span>🏠</span> Dashboard
+          </button>
+
+          {projects.length>0 && (
+            <div className="mt-3 mb-1">
+              <div className="text-xs font-semibold text-slate-400 uppercase tracking-wide px-3 mb-1">Projetos</div>
+              {projects.slice(0,8).map(p=>(
+                <button
+                  key={p.id}
+                  onClick={()=>{ onNavigate('project',p); setSideOpen(false); }}
+                  className={`w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs mb-0.5 text-left transition ${view==='project'&&currentProjectId===p.id?'bg-blue-50 text-blue-700 font-semibold':'text-slate-600 hover:bg-slate-50'}`}
+                >
+                  <span>📁</span><span className="truncate">{p.nome}</span>
+                </button>
+              ))}
+              {projects.length>8 && <div className="text-xs text-slate-400 px-3 py-1">+{projects.length-8} mais...</div>}
+            </div>
+          )}
+        </nav>
+
+        <div className="px-5 py-3 border-t border-slate-100 text-xs text-slate-400 text-center">
+          LabFinance v2.0 · {new Date().getFullYear()}
+        </div>
+      </aside>
+    </>
+  );
+}
+
+// ─── MAIN APP ────────────────────────────────────────────────────────────────
+
+function App({ session, onLogout }) {
+  const [projects, setProjects] = useLS('lf_projects', SAMPLE_PROJECTS);
+  const [allItems, setAllItems] = useLS('lf_items', SAMPLE_ITEMS);
+  const [allTypesRaw, setAllTypes] = useLS('lf_types', SAMPLE_TYPES);
+  const [allRubricas, setAllRubricas] = useLS('lf_rubricas', SAMPLE_RUBRICAS);
+
+  const allTypes = useMemo(() => {
+    const result = {};
+    Object.keys(allTypesRaw).forEach(pid => {
+      result[pid] = migrateTypes(allTypesRaw[pid]);
+    });
+    return result;
+  }, [allTypesRaw]);
+
+  const [view, setView] = useState('dashboard');
+  const [currentProject, setCurrentProject] = useState(null);
+  const [modalProject, setModalProject] = useState(null);
+  const [editingProject, setEditingProject] = useState(null);
+  const [sideOpen, setSideOpen] = useState(false);
+  const [toasts, pushToast] = useToast();
+
+  const navigate = (v, p=null) => {
+    setView(v);
+    if (p) setCurrentProject(p);
+  };
+
+  const saveProject = data => {
+    if (editingProject) {
+      setProjects(ps=>ps.map(p=>p.id===editingProject.id?{...p,...data}:p));
+      if (currentProject?.id===editingProject.id) {
+        setCurrentProject(p=>({...p,...data}));
+      }
+      pushToast('Projeto atualizado!');
+    } else {
+      const proj = { ...data, id:genId(), criado_em:new Date().toISOString() };
+      setProjects(ps=>[proj,...ps]);
+      setAllTypes(at=>({ ...at, [proj.id]:[] }));
+      setAllRubricas(ar=>({
+        ...ar,
+        [proj.id]: DEFAULT_RUBRICAS.map(nome => ({ id: genId(), nome }))
+      }));
+      pushToast('Projeto criado com sucesso!');
+    }
+    setModalProject(null);
+    setEditingProject(null);
+  };
+
+  const deleteProject = id => {
+    setProjects(ps=>ps.filter(p=>p.id!==id));
+    setAllItems(ai=>{ const n={...ai}; delete n[id]; return n; });
+    setAllTypes(at=>{ const n={...at}; delete n[id]; return n; });
+    setAllRubricas(ar=>{ const n={...ar}; delete n[id]; return n; });
+    if (currentProject?.id===id) {
+      setView('dashboard');
+      setCurrentProject(null);
+    }
+  };
+
+  const updateItems = (pid,items) => setAllItems(ai=>({ ...ai, [pid]:items }));
+  const updateTypes = (pid,types) => setAllTypes(at=>({ ...at, [pid]:types }));
+  const updateRubricas = (pid,rubricas) => setAllRubricas(ar=>({ ...ar, [pid]:rubricas }));
+
+  return (
+    <div className="flex h-screen overflow-hidden">
+      <Sidebar
+        view={view}
+        projects={projects}
+        currentProjectId={currentProject?.id}
+        onNavigate={navigate}
+        sideOpen={sideOpen}
+        setSideOpen={setSideOpen}
+      />
+
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <header className="bg-white border-b border-slate-100 px-5 py-3 flex items-center gap-3 no-print">
+          <button onClick={()=>setSideOpen(s=>!s)} className="lg:hidden p-2 rounded-lg hover:bg-slate-100 text-slate-600 text-lg">☰</button>
+          <div className="flex-1 text-sm text-slate-500">
+            {view==='dashboard'?'Dashboard':currentProject?currentProject.nome:''}
+          </div>
+          <div className="hidden md:flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+            <div className="text-right">
+              <div className="text-xs text-slate-400">Sessão ativa</div>
+              <div className="text-sm font-semibold text-slate-700">{session?.email}</div>
+            </div>
+            <button onClick={onLogout} className="px-3 py-2 text-sm rounded-lg bg-slate-900 text-white hover:bg-slate-800">Sair</button>
+          </div>
+          <div className="text-xs text-slate-400 hidden sm:block">{fmtDate(todayISO())}</div>
+        </header>
+
+        <main className="flex-1 overflow-y-auto p-5 lg:p-7">
+          {view==='dashboard' && (
+            <Dashboard
+              projects={projects}
+              allItems={allItems}
+              allTypes={allTypes}
+              onOpen={p=>navigate('project',p)}
+              onCreate={()=>{ setEditingProject(null); setModalProject('new'); }}
+              onEdit={p=>{ setEditingProject(p); setModalProject('edit'); }}
+              onDelete={deleteProject}
+              toast={pushToast}
+            />
+          )}
+
+          {view==='project' && currentProject && (
+            <ProjectDetail
+              project={currentProject}
+              items={allItems[currentProject.id] || []}
+              projectTypes={allTypes[currentProject.id] || []}
+              projectRubricas={allRubricas[currentProject.id] || []}
+              onBack={() => navigate('dashboard')}
+              onUpdateItems={items => updateItems(currentProject.id, items)}
+              onUpdateTypes={types => updateTypes(currentProject.id, types)}
+              onUpdateRubricas={rubricas => updateRubricas(currentProject.id, rubricas)}
+              onEditProject={p => { setEditingProject(p); setModalProject('edit'); }}
+              toast={pushToast}
+            />
+          )}
+        </main>
+      </div>
+
+      {modalProject && (
+        <Modal title={editingProject?'Editar Projeto':'Novo Projeto'} onClose={()=>{ setModalProject(null); setEditingProject(null); }}>
+          <ProjectForm
+            project={editingProject}
+            onSave={saveProject}
+            onCancel={()=>{ setModalProject(null); setEditingProject(null); }}
+          />
+        </Modal>
+      )}
+
+      <ToastContainer toasts={toasts} />
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<AuthApp />);
+</script>
+</body>
+</html>
